@@ -130,3 +130,62 @@ Console.WriteLine("Frist");
 Console.WriteLine("Second");
 ```
 
+在第一行完成之后，第二行才开始，语句是按行执行。但是异步执行并不是按照这种方式，而都是 continuations 执行。当你开始执行某命令的时候，你告诉在这个操作完成之后将要执行什么。你或许听说过（或者用过）callback 的概念，但是那个有更宽泛的概念。在异步的语境中，这种 callback 是用来保存程序的状态而不是仅仅为了特殊的目的回调操作，比如 GUI 的事件 handler。
+
+Continuation 在 .NET 中用委托的形式保存，它们通常是一个具体的接受异步操作返回值的的操作（Action）。这也是为什么在 C# 5 之前的的异步方法中的 `WebClient` ，你需要为不同的事件比如成功，失败或者其他定义好具体的处理代码。但是问题是为这些复杂的操作定义好这些委托将会非常困难，尽管我们可以使用 lambda 表达式。如果你想确保你的错误处理没有问题，那么情况将变得更加糟糕。
+
+总之，所有的 `await` 语句要求编译器构建一个 continuation， 这种简明扼要地表达方式是的代码地可阅读性和开发者舒适性来看，都值得称赞。
+
+我之前地描述地异步有点理想化了，实际上基于 Task 地异步模型都有点轻微地不同，并不是将一个 continuation 传递给异步操作，而是异步操作在开始地时候，将一个 token 返回给调用方，它能够提供所需要地 continuation。它代表了一个持续中地操作，也就是说它可能已经完成了或者说还在进行中。这个 token 非常有用，比如说我这边代码无法再进行下去，只有拿到这个操作地返回值。通常这个 Token 是 Task 或者是 Task<Result>, 但也不是必须的。
+
+在 C# 5 中典型的异步执行流程如下
+
+1. 做某些事情
+2. 开始一个异步操作，并且记下返回的 token
+3. 尽可能地再做其他一些工作
+4. 等待异步操作完成
+5. 做其他地事情
+6. 完成
+
+如果你不关心其中等待地部分，你可以在 C# 4 中做任何事情，但是如果你愿意等待直到异步地操作完成，那么 token 将会起重要地作用。对于 Task，你可以简单地调用 wait() 方法，此刻你在占据着重要地资源（线程）而并没有做任何有用地工作。就好像你电话定了一份pizza 外卖，但是一直站在门口等待快递小哥地到来。你真正想要的是做其他事情并且忽略 pizza 直到它到了，这时就是 await 发挥作用了。
+
+当你等待一个异步操作，你好像再说:"我接下来尽可能地多做一些事情，直到这个操作完成”。如果你不想阻塞线程，你要怎么办？非常简单，只要在那边立即返回，让它自己异步执行。如果你想让调用者直到是否你的异步已经完成，只要返回一个 token 给调用者。
+
+#### 5.2.2 同步上下文
+之前我提到过，UI 代码地黄金准则是不允许跨线程更新用户界面，在之前地例子中，检查网页地长度是在异步中执行，所以你要确保 await 表达式之后地代码是在 UI 线程中执行。异步函数会通过 SynchronizationContext 回到正确地线程上执行，这个类从 .NET 2.0 就已经存在了，广泛使用在 BackgroundWorker 组件中。SynchronzationContext 可以将一个委托执行在正确的线程上，它的 Post (异步) 和 Send (同步) 消息和 Control.BeginInvoke 和 Control.Invoke 类似。
+
+不同的执行环境使用不同的上下文，比如一个上下文可以让来自线程池中的线程执行给定的操作。 如果你对异步方法如何做到管理不同的执行情况，你可以关注 synchronziation 上下文。如果你是一个 ASP.NET 的开发者，特别要留心它的上下文，它经常让开发者陷入死锁状态。但是在 ASP.NET core 中，这种情况好多了。
+
+有了这些基础理论，让我们近距离地看看异步方法种地细节，匿名异步函数和异步方法类似，但是异步方法看上去更容易理解。
+
+#### 5.2.3 异步方法模型
+
+下图是一个非常好的异步方法模型 
+
+![](./async_model.png)
+
+这里你有三个代码块，两个边界类型。作为简单地例子，在控制台版本地获取网页长度地应用程序，你地代码可能如下。
+
+```C#
+static readonly HttpClient client = new HttpClient();
+
+static async Task<int> GetPageLengthAsync(string url)
+{
+    Task<string> featchTextTask = client.GetStringAsync(url);
+    int lenght = (await fetchTextTask).Length;
+    return length;
+}
+
+static void PrintPageLength()
+{
+    Task<int> lengthTask = 
+        GetPageLengthAsync("http://csharpindepth.com");
+    Console.WriteLine(lengthTask.Result);
+}
+```
+
+下图展示了具体实例地细节对应上图地概念。
+
+![](async_model_concrete.png)
+
+你感兴趣地是 `GetPageLengthAsync` 方法，但是我已经包含了 `PrintPageLength` 方法以便让你看看这些方法是怎么交互地。特别要注意地是，你一定要知道每个方法边界的地有效类型，在本章中我将会重复展示这张示意图。
