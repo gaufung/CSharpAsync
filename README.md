@@ -188,4 +188,133 @@ static void PrintPageLength()
 
 ![](async_model_concrete.png)
 
-你感兴趣地是 `GetPageLengthAsync` 方法，但是我已经包含了 `PrintPageLength` 方法以便让你看看这些方法是怎么交互地。特别要注意地是，你一定要知道每个方法边界的地有效类型，在本章中我将会重复展示这张示意图。
+你感兴趣地是 `GetPageLengthAsync` 方法，但是我已经包含了 `PrintPageLength` 方法以便让你看看这些方法是怎么交互地。特别要注意地是，你一定要知道每个方法边界的地有效类型，在本章中我将会以不同步地形式重复展示这张示意图。
+
+现在你想尝试写异步地方法看看它们究竟是如何工作地，但是如果详细展开那将涉及到很多内容。
+这里只有两处语法不同，在声明一个异步方法的时候添加 `async` 和等待一个异步操作的时候的 `await`。下面三个小节将讨论异步方法的三个阶段。
+
+- 使用 `async` 声明异步方法
+- 使用 `await` 操作符等待一个异步操作
+- 当操作完成时候的返回值
+
+### 5.3 异步方法声明
+
+异步方法声明和其他方法一样，只不过增加了一个 `async` 的关键字。它可以出现在返回值之前的任何位置，下面都是合法的形式：
+
+```C#
+public static async Task<int> FooAsync() {}
+public async static Task<int> FooAsync() {}
+async public Task<int> FooAsync() {}
+public async virtual Task<int> FooAsycn() {}
+```
+
+我更倾向去将 `async` 紧靠着返回值之前，但是这个取决于个人的偏好，这个和你们团队的人讨论好这个问题。
+现在 `async` 关键字好像有点神秘，语言的设计者其实没有必要添加一个 async 关键子，编译器只需要检查方法内部是否 `await` 关键字即可。但是我还是乐意让 `async` 是必须的，这样让读代码的时候就知道这是一个异步的方法，就像给你一个标识，让你关注其中的 await 语句。并且将阻塞的调用转变为异步地的调用。
+实际上在生成的代码中，`async` 没有任何作用，只不过让调用者注意到这一点。这是一个兼容性的改变不管是源码还是二进制角度。实际上这个一个实现的细节，你不能在抽象方法和接口的方法中使用 `async`。但是更多的是在接口定义的时候使方法的返回值为 Task，不同的实现可以采用不同的方式，既可以使用 `async/await`，也可以使用常规的方法。
+
+#### 5.3.1 异步方法的返回类型
+调用者和异步方法之间的的通信是通过返回值完成的，在 C# 5 中，异步函数的返回值限定为以下三种
+- void
+- Task
+- Task<TResult> (对于 TResult，我们叫做类型参数）
+
+在 C# 7 中，这个列表中包含了 Task Types 类型，在 5.8 节和第六章中也可以看到。
+在 .NET 4 中，Task 和 Task<TResult> 都表示还没有完成的操作。Task<TResult> 从 Task 中派生出来。两者的不同在于 Task 代表了操作返回的值的类型为 TResult. 然而 Task 并没有返回值，但是这个仍然是有效的，因为它提供了调用方和异步操作之间沟通的桥梁，用来判断它是否完成或者失败。在某些情况下可以将 Task 当作 T Task<void> 类型来使用，这样也是同样合法的。
+
+设计返回值为 void 的主要原因是用来和事件处理相兼容，举个例子，你或许有也给 UI 按钮的单击的处理事件如下
+
+```C#
+private async void LoadStockPrice(object sender, EventArgs e)
+{
+    string ticker = ticketInput.Text;
+    decimal price = await stockePriceService.FetchPriceAsync(ticket);
+    priceDisplay.Text = price.ToString("c");
+}
+```
+
+这是一个异步方法，但是调用代码（OnClick) 并不关心，它只需要知道处理的事件是否完成，只要你加载了股票价格并且更新 UI。实际上编译器将会为这段代码创建一个状态机，附上一个 continuation，当你在 FetchPriceAsync 方法完成后即可执行。
+你也可以使用订阅的方式来创建指定事件的执行方法。
+
+```C#
+loadStockPriceButton.Click += LoadStockPrice;
+```
+
+尽管异步方法的返回值非常严格，但是其他的和正常方法一致，如果泛型，静态或者非静态，访问权限修饰符，不过在形参上有限制。
+
+#### 5.3.2 异步方法的参数
+
+异步方法中的任何参数都不允许使用 `out` 和 `ref` 修饰符。这样做是合理的，因为这些修饰符是用来和调用者之间沟通的，有些异步方法可能还没有执行就返回给调用者，这样引用形式的参数就有可能还没有设置。所以就有可能出现下面的状况，想象以下你将一个值通过 ref 传递给一个方法，异步方法可能是在调用异步操作之后才赋值，所以这样做是不合理的，所以编译器禁止这样做，同样指针类型也不允许这样做。
+
+### 5.4 await 表达式
+
+在方法声明中使用 `async` 标识符主要是为了使用 `await` 表达式。 除此之外，其余的和正常方法非常类似。你可以用任何控制流：循环，异常，using 语句或者其他任何事情。所以什么时候才可以使用 `await` 表达式，究竟怎么做？
+
+`await` 表达式非常简单，仅仅使用 `await` 紧接着一个其他可以生成值的表达式。你可以等待一个函数调用的返回值，一个变量，一个属性。你也可以将一连串方法调用串起来，然后等待它们的结果。
+```C#
+int result = await foo.Bar().Baz(); 
+```
+最前面的 `await` 表达式的优先级比点（调用）操作还低，所以代码等同于下面的形式。
+
+```C#
+int result = await (foo.Bar().Baz());
+```
+
+但是使用是由限制的，这些表达式必须要可等待的，这样才可以使用这种模式。
+
+#### 5.4.1 awaitable 模式
+
+awaitable 模式就是用来决定哪些类型可以用在 `await` 操作符后面。
+![](./awaitable_pattern.png)
+上图中第二个边界就是说明了异步方法如何与其他异步操作进行交互的。这个 awaitable 模式就是我们说的的异步操作。
+
+你或许知道编译器通过检查是否实现 `IDisposable` 接口来判断该类是否可以使用在 using 语句中。想象以下如果你有一个类型为 T 的表达式想要等待，编译器会做如下检查。
+- T 类型必须由一个无参数的 GetAwaiter() 的实例方法，或者一个扩展方法，接受一个类型参数 T。 这个方法的返回值必须要是非空，返回类型就叫做 awaiter type.
+- awaiter type 应当实现了 System.Runtime.INotifyCompletion 接口，这个接口只有一个方法 void OnCompleted(Action)
+- awaiter type 应当有一个可读的实例属性叫做 IsCompleted，并且返回类型为 bool.
+- awaiter type 应当哟一个非泛型的无参数实例的方法，叫做 GetResult.
+- 上面所说的不必要是 public的，只要你能够从异步方法中能够访问。
+
+如果 T 通过检查，那么你就可以 await 一个类型为 T 的值。虽然编译器需要知道更多的信息，来决定你的 await 表达式的应该是什么是 GetResult 方法的返回值。在这个例子中使用的 void, 也就是说这个 await 表达式被认为是无结果的，就跟直接调用一个 void 方法一样。否则 await 表达式就被分类为生成和 GetResult 相同返回值的类型。
+举个例子，让我们考虑以下 Task.Yield() 静态方法，不同于 Task 的其他方法，Yield() 方法并不返回任务本身，它返回一个 YieldAwaitable 类型。下面是简化的版本。
+```C#
+public class Task 
+{
+    public static YieldAwaitable Yield();
+}
+
+public struct YieldAwaitable
+{
+    public YieldAwaiter GetAwaiter();
+
+    public struct YIeldAwaiter : INotifyCompletion
+    {
+        public bool IsCompleted {get;}
+        public void OnCompleted(Action continuation);
+        public void GetResult();
+    }
+}
+```
+你可以看到 YieldAwaitable 遵循上面的的描述，所以可以这样使用
+```C#
+public async Task ValidPrintYieldPrint()
+{
+    Console.WriteLine("before yielding");
+    await Task.Yield();
+    Console.WriteLine("after yielding");
+}
+```
+但是下面的就不是合法的表达，因为它尝试从 YieldAwaitable 中获取结果
+
+```C#
+public async Task InvalidPrintYieldPrint()
+{
+    Console.WriteLine("before yielding");
+    var result = await Task.Yield();
+    Console.WriteLine("after yielding");
+}
+```
+在 InvalidPrintYieldPrint 方法中的无效和下面的是同样的结果。
+
+```C#
+var result = Console.WriteLien("WrintLine is a void method");
+```
