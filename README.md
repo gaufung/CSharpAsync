@@ -316,5 +316,55 @@ public async Task InvalidPrintYieldPrint()
 在 InvalidPrintYieldPrint 方法中的无效和下面的是同样的结果。
 
 ```C#
-var result = Console.WriteLien("WrintLine is a void method");
+var result = Console.WriteLine("WrintLine is a void method");
 ```
+因为没有返回值，所以不能将它赋值给一个变量。所以不奇怪的是， Task 类型有一个返回值为空的 `GetResult` 方法，而 `Task<TResult>` 类型有一个返回值为 TResult 的 GetResult 方法。
+
+在 5.6 节中更多详细的细节来描述 awaitable 模式。 所以你在考虑异步方法的时候，你并不只是完成了 await 表达式，还有更多的其他细节。
+
+#### 5.4.2 await 表达式的限制
+
+和 yield return 一样，规则限制你使用 await 表达式场景，最显著的特点就是它只能使用在 aysnc 描述的方法和表达式中。甚至在 async 方法中不能再匿名方法中使用 await 语句，除了这个匿名方法也是异步的。
+
+await 语句不能使用在不安全的上下文中，但是这并不意味着异步方法中不能使用不安全上下文，下面的例子说明了这种情况：
+
+```C#
+static async Task DelayWithResultOfUnsafeCode(string text)
+{
+    int total = 0;
+    unsafe 
+    {
+        fixed(char* textPointer = text)
+        {
+            char *p = textPointer;
+            while(*p!=0)
+            {
+                total += *p;
+                p++;
+            }
+        }
+    }
+    Console.WriteLine("Deplaying for " + total + "ms");
+    await Task.Delay(total);
+    Console.WriteLine("Deplay complted");
+}
+```
+
+所以你不能在 lock 语句中使用 await，如果你发现在等待异步操作完成的时候还拥有一把锁，那么你要重新考虑以下你的代码。也不要尝试使用 Monitor.TryEnter 或者是 Montir.Exit 这样的方法。改变你的代码，以便它不需要 lock 也能工作。如果实在是需要，考虑使用 SemaphoreSlim, 并且使用 WaitAsync 方法。
+因为获取锁和释放锁必须要是同一个线程，这个和在异步中，await 语句之后可能并不是同一个线程相违背，虽然 GUI 应用程序可以做到这一点，但是其他应用程序并不是在异步方法开始和结束都在同一个线程。基本上来讲，lock 语句和异步并不能很好的相处。
+
+下面是一些使用场景，在 C# 5 中无效，但是在 C# 6 中有效。
+- 任何 try 和 catch 语句块
+- catch 语句块
+- finally 语句块
+
+在 try 语句只用 finally 语句中，使用 await 是没有问题的，也就是说在 using  语句中使用也是没问题的。 C# 设计并没有弄清楚在 C# 5 发布之前，await 在上述的上下文中是否安全。但是在 C# 6 中，他们弄清楚了如何在上述情况中构建出正确的状态机。
+
+现在你知道了如何声明一个异步方法，如何使用 await 表达式。但是在你已经完成异步工作后发生了什么，让我们来看看值是如何返回给调用代码的。
+
+### 5.5 封装返回值
+
+我们已经知道如何声明调用方法和异步方法之间的界限，也知道了如何在一个异步方法中等待一个异步操作。
+
+![](async_return_value.png)
+
