@@ -402,3 +402,494 @@ static async Task<int> GetPageLengthAsync(string url)
 大部分情况下，你不过在是编写带啊吗，所以掌握前两层次并没有大的问题。除非我在写大量的操作来安排它们，我很少考虑到第二个层次的细节。大部分时候，我们只需要让它跑起来。但是重要的是你要知道为什么是这样的。
 
 #### 5.6.1 在等待什么等多久。
+
+首先简单一点，有时候 await 用来调用方法链的结果或者是属性，比如说：
+
+```C#
+string pageText = await new HttpClient().GetStringAsync();
+```
+看上去 await 可以修改整个表达式的意义，实际上，await 只能作用于单个值。之前的表达式等同于下面：
+
+```C#
+Task<string> task = new HttpClient().GetStringAsync();
+string pageText = await task;
+```
+
+同样的，await 表达式也可以用在方法的参数中或者其他表达式。如果你有两个方法,分别为 GetHourlyRateAsync() 和 GetHoursWorkedAsync()，分别返回 Task<decimal> 和 Task<int>，你可以有下面这个负载的语句
+
+```C#
+AddPayment(await emploee.GetHourlyRateAsync() * 
+           await timeSheet.GetHoursWorkedAsync(employee.Id));
+```
+
+和正常的 C# 表达式计算一样，乘号右边的表达式必须在左边的执行完毕之后才能继续执行。所以前面的表达式可以等效于下面的
+
+```C#
+Task<decimal> hourlyRateTask = employee.GetHourlyRateAsync();
+decimal hourlyRate = await hourlyRateTask;
+Task<int> hoursWorkedTask = timeSheet.GetHoursWorkedAsync(employee.Id);
+int hoursWorked = await hoursWorkedTask;
+AddPayment(hourlyRate * hoursWorked)
+```
+
+怎么写代码是有点区分，如果你觉得单个语句更容易阅读，没问题；如果你将他们都展开，你也许有更多的代码，但是更容易理解和调试。你也可以使用第三种方法，但是这一种方法将产生不同的效果
+
+```C#
+Task<decimal> hourlyRateTask = employee.GetHourlyRateAsync();
+Task<int> hoursWorkedTask = timeSheet.GetHoursWorkedAsync(employee.Id);
+AddPayment(await hourlyRateTask * await hoursWorkedTask);
+```
+
+我认为这一种更加容易阅读，而且性能上更加优越。这一节最重要的是要弄清楚他在等待什么什么时候开始等待。在这种情况下，从 GetHourlyRateAsync 和 GetHoursWorkedAsync 返回的任务被等待。 在每种情况下，在调用 AddPayment 方法之前，都要等待这些结果。这样是合理的，你需要得到两者的结果的成绩作为参数传递给 AddPayment. 如果使用同步，一切都显而易见的。现在已经知道如何简化要等待的值的代码，现在你需要知道在等待的时候发生了什么。
+
+#### 5.6.2 执行等待表达式
+
+执行过程中到达 await 表达式，有两种可能情况，一种是异步操作已经完成，另一种是没有完成。如果操作已经完成了，事情就好办了，执行流继续进行下去。如果操作失败并且捕获了一个异常，异常就会被抛出。否则操作的返回的结果就被解析，比如将 string 类型的结果从 Task<string> 中解析出来。所有的这一切都没有线程上下文切换，或者附上一个 continnuation。
+
+但是更有趣的场景是，异步操作还在进行中。在这种情况下，这个方法将会等待异步操作的完成，然后在合适的上下文继续执行下去。异步的等待意味着这个方法并没有执行，一个 continuation 将会附给这个异步操作，然后方法返回了。异步的基础设施能够保证整个 continuation 能够在正确的线程上执行。通常是线程池线程，或者是 UI 线程。这个取决于 synchronization 上下文。通过 Task.ConfigurationAwait 也可以控制它们的行为。
+
+从开发者的角度来看，就像这个方法被暂停了直到异步操作完成。编译器能够保证所有的方法中的局部变量都能拥有在 continuation 创建之前一样的值。就更 yield return 语句中的一样。
+
+让我们看看控制台的简单的应用程序，它使用单个异步方法等待两个任务，Task.FromResult 通常返回一个完成的任务，而 Task.Deploy 在等待特定的时间后返回。
+
+```C#
+static void Main()
+{
+    Task task = DemoCompletedAsync();
+    Console.WriteLine("Method returned");
+    task.Wait();
+    Console.WriteLine("Task Completed");
+}
+
+static async Task DemoCompletedASync()
+{
+    Console.WriteLine("Before first wait");
+    await Task.FromResult(10);
+    Console.WriteLine("Between awaits");
+    await Task.Delay(1000);
+    Console.WriteLine("After second await");
+}
+```
+输出如下
+
+```
+Before first await
+Between awaits
+Method returned
+After second await
+Task completed
+```
+
+从中我们可以得到
+
+- 异步方法并不等待已经完成任务，方法仍然按照同步的方法执行。这也是为什么你在头两行中看不到其他的。
+- 异步方法只有在延迟的任务中返回，这也是为什么第三行中的 Method returned 在 Main 方法中输出。异步方法可以表明异步的操作还没有未完成，而是选择返回。
+- 异步方法只有在异步操作完成后才返回，这也是为什么 Task Completed 在 After second await 之后输出。
+
+![](./await_flow1.png)
+
+上图表明了 await 表达式执行流。你可以认为虚线部分作为另一个分支。 注意我假设 await 表达式的是有结果的。 如果你在等待一个普通的 Task 或者其他相似的形式。fetch result 可以意味着用来检查操作是否成功完成。
+请仔细思考一下从一个异步方法返回意味着什么，两种可能：
+- 这是第一个 await 表达式需要等待，所以你还有原先的方法的调用栈
+- 你已经等待过还没有完成的任务。所以你现在在一个 continuation 中被其他调用。你的调用栈和进入这个方法的时候完全不同了。
+
+在第一种情况下，你通常以 Task 或者 Task<TResult> 返回给调用者。显然你还没有方法的结果，你甚至不知道方法是否完成，所以你的方法将会作为一个未完成的任务。
+
+在后一种情况中，调用你 continuation 的取决于你的上下文。举个例子来讲，在 window form UI 中，如果你通过 UI 线程中启动一个异步方法，而且不刻意切换走，那么整个方法将会在UI线程中。在方法的前半部分，你将会在 event handler 或者其他任何启动异步方法中执行。后面部分，你将会被 Windows Forms 内部机制直接调用。正如你使用 Control.BeginInvoek(continuation) 一样。在调用代码中，无论是 Windows From 消息队列或者线程池中部分，并不关心你的任务。
+
+提醒一下，直到到达 await 表达式，整个方法的执行都是同步地。调用异步方法并不是简单地在单独线程其中启动新的任务。这个拒绝于你来确保你总是编写地异步方法能够快速地返回。需要承认的是，这个取决于你写代码的上下文，一般来将，你需要避免在异步方法中执行长时间运行的工作。将它迁移到其他方法中并且为它创建一个 Task。
+
+我想在简单回顾一下当你的等待的操作已经完成了的情况，你可能想知道为什么已经完成的操作首先会被看作异步。就好像在 Linq 中调用 Count 方法，通常情况下，你或许要迭代序列中的每个元素，但是在某些情况下，比如 List<T>, 有更优化的方法。使用单个抽象来满足大部分场景是有用的，但是不需要付执行时间的成本。
+
+显式时间就是异步 API 的例子。考虑异步地从文件或者磁盘流中读取数据，如果如果所有地数据都已经从磁盘读到内存中，获取在之前地 ReadAsync 调用中，应该直接返回而不是通过异步地方式。另一个例子就是架构中地缓存，如果你想从内存缓存，或者其他地方读取对于异步操作都是透明的。既然你已经知道基本的操作流，现在你知道如何将他们 await 模式拼装起来。
+
+#### 5.6.3 异步模式的使用
+
+在之前小节中，我描述了异步模式中需要完成的返回类型需要满足的要求，下图是之前的一个更加通用的描述。
+
+写道这里，你可能想知道这些细节都是关于什么的，为什么语言要支持这些。 附属一个 continuation 比想象中的还要复杂。在简单情况下，当整个控制逻辑都是线性的，continuation 就像一个 lambda 表达式一样。但是如果表达式包含了循环或者判断条件，这样问题就变得负载起来，这也就是为什么 async/await 的作用。尽管你可以认为编译器仅仅提供了一个语法糖而已，但是在提供可读性这一块还是有这巨大的提升。
+
+到目前为止，我们仅仅讨论了正确的执行结果，但是如果失败了怎么办？
+
+#### 4.6.4 异常拆封
+
+对于 .NET 而言，使用异常代表失败。就跟返回值给调用者一样，异常处理需要语言的支持。当你等待的异步操作失败了，或许它已经在另外一个线程里已经发生了好久。正常的异常传递在这里不起作用了。在这里 async/await 尝试将处理异步异常的体验尽可能地和同步模式相类似。如果你认为失败是另外一种结果，那么异常和返回值处理是类似的。在下一小节中，你将看到异常是如何向异步方法外传递的，但是目前先要看一下异步操作中发生异常会怎样。
+
+GetResult 方法意味着从返回值中取结果，它同样肩负着将异步操作的的异常传递过来。这个听上去不简单，因为在异步世界中，当个 Task 代表了多个操作，可能会有多个失败。就以 Task 和 Task<TResult> 为例， 它有多少方法来表示失败
+
+- Status 的属性为 Faulted 的时候，表示为失败
+- Exception 属性返回一个 AggregateException, 它包含了所有的异常信息
+- 使用 Wait() 方法抛出一个 AggregateException 
+- Task<TResult> 类型的 Result 抛出 AggregateException 
+
+任务也支持通过 CancellationTokenSource 来支持取消的概念，如果任务取消了，Wait() 方法和 Result 属性会抛出包含 OperationCanceledException 的 AggerateException，但是 Status 会变成 Canceled 而不是 Faulted.
+
+当你等 await 一个 task，如果它是 faulted 或者 canceled, 一个异常就会被抛出来，但是这一次不是 AggerateException，而是 AggreateException 中的第一个异常被抛出。大部分情况下，这就是你想要的。这也是 async 的功能，它允许你写出异步的方法异步的代码就跟呢同步的代码一样。举个例子，考虑下面的代码，它尝试从其中的 URL 中获取结果，直到其中一个成功。
+
+```C#
+async Task<string> FetchFirstSuccessfulAsync(IEnumerable<string> urls)
+{
+    var client = new HttpClient();
+    foreach(string url in urls)
+    {
+        try
+        {
+            return await client.GetStringAsync(url);
+        }
+        catch(HttpRequestException exception)
+        {
+            Console.WriteLine("Failed to fecht {0}: {1}",
+            url, exception.Message);
+        }
+    }
+    throw new HttpRequestException("No URLs succeeded");
+}
+```
+
+目前忽略你忽视了原先的异常而且顺序地获取网页，在这里值关注 HttpRequestException. 你尝试使用 HttpClient 开始一个异步操作，如果发生了失败，它将会抛出一个 HttpRequestException, 并且你尝试捕获并并且处理它。它看上去像是你想要做的事情，但是 GetStringAsync 方法调用并不会抛出一个异常比如是服务器超时，因为这个方法仅仅是启动这个方法。在发现异常地时候，方法已经返回了，它返回给任务一个 faulted 地形式，并且包含一个 HttpRequestException。如果你简单地调用 Wait 方法，AggerateException 就会被抛出，它包含吗了一个 HttpRequestException 实例，而 GetResult 方法抛出 HttpRequestException, 它们能够被正常地被 catch 语句捕获。
+
+当然，着同样会丢失信息。如果有多个异常被抛出，GetResult 只能获取其中地一个。你获取想重写上面地代码，当调用者捕获了 AggregateException 异常然后检查所有的地失败情况。重要的是框架已经帮你做了这些事情， 举个例子，Task.WhenAll() 可以异步地等待多个任务完成。如果其中任何一个失败，结果就是失败的，他包含了所有失败任务中地异常。如果你想检查其中的异常，使用对每个任务中使用 Task.Exception 进行检查。
+
+总结来讲，awaiter 类型的 GetResult() 方法用来在等待的时候传递成功的结果和异常，在 Task 和 Task<Result> 中 GetResult()  拆封了任务中的 AggregateException 来抛出第一个内部异常。这也解释了一个异步方法如何消费另一个异步操作。但是如果做到传递的呢？
+
+#### 5.6.5 方法完成
+
+首先先回顾一下下面几点内容
+- 一个异步方法通常在它完成之前返回
+- 它在命中一个一个还没有完成的表达式返回
+- 假设不是一个返回 void 的方法，在 C# 7 之前，它们必须是 Task 或者 Task<TResult>，在 C# 7 之后，可以自定义类型，目前我们假设返回值为 Task<TResult>
+- task 用来表示什么时候，以何种方式完成任务，如果 task 状态变成 RanToCompletion, 那么 Result 包含了返回值。如果方法抛出了一个异常，这个任务变成 Faulted. 异常会被封装到 AggerateException 中，包含在 task 的 Exception 属性中。
+- 当 task 状态变成任何一种终止状态，和它相关的 continuation 都会被开始被执行。
+
+这些都是有编译器帮你完成了，在下一章中你将会看看其中的细节。这一章专注于你代码中可以依赖的行为。
+
+**成功返回**
+成功的情况是最简单的情况，如果你的方法声明返回 Task<TResult> ，那么返回语句可以为 T （T可以转换为 TResult)，基础框架可以帮你将值传递到 task
+如果返回类型是 Task 或者 void， 那么任何语句必须是 return 空的形式，或者直接让执行到达方法的最后，就跟普通的非异步地 void 方法。在这两种情况下，都不需要传递值，但是 task 的状态可以改变。
+
+**异常和参数验证延迟**
+
+最重要的一点是异步方法中的异常并不是立即返回，甚至方法体在做的第一件事情就是抛出异常，只不过返回一个 faulted 任务。所以这个对于参数验证有点痛苦。假设你想在异步方法中先验证参数之后再执行任务。如果想跟正常的同步代码中的一样验证参数，调用者并不会立马得到错误，而是等到 task 被等待之后才行。下面的是个例子
+
+```C#
+static async Task MainASync()
+{
+    Task<int> task = ComputeLengthAsync(null);
+    Console.WriteLine("Fetch the task");
+    int length = await task;
+    Console.WriteLine("Length:{0}", length);
+}
+
+static async Task<int> ComputeLenghtAsync(string text)
+{
+    if(text == null)
+    {
+        throw new ArgumentNullException("text");
+    }
+
+    await Task.Delay(500);
+    return text.Length;
+}
+```
+
+输出显示 Fetch the task 再失败之前输出。异常同步地被抛出，因为在验证参数之前没有 await 表达式。但是调用代码并不能在 await 任务之前得到异常信息。 一些参数验证很容易地在调用异步操作之前完成，在这种情况下，更好的情况是调用方能够立即得到失败报告。举个例子，HttpClient.GetStringAsync 在得到一个空引用会立即抛出一个异常。
+
+你也不要太担心这件事情，早期验证参数被认为是锦上添花的功能。如果你想以同步的形式抛出异常，你有三种选择，它们都大同小异。主要思想是以非异步的方法返回任务，它的工作用来验证参数，然以后调用单独的异步方法，假设所有的参数有已经验证完毕。这三种方法有
+- 你可以使用单独的异步方法
+- 你可以使用异步匿名方法
+- 在 C# 7 种，可以使用局部异步方法
+
+我更倾向于最后一种，因为它不需要额外引入额外的方法。下面展示第一种方法，它不包含任何我们没有涉及的东西，只要修改 ComputeLengthAsync 方法，调用方法不需要修改。
+
+```C#
+static Task<int> ComputeLengthAsync(string text)
+{
+    if(text == null)
+    {
+        throw new ArgumentNullException("text");
+    }
+    return ComputeLengthAsyncImpl(text);
+}
+
+static async Task<int> ComputeLengthAsyncImpl(string text)
+{
+    await Task.Delay(500);
+    return text.Length;
+}
+```
+现在当 ComputeLengthAsync 调用的时候是 null 参数， 异常会被同步的抛出，而不是返回一个失败的任务。在开始匿名异步方法的时候，让我们重新回顾一下取消操作。
+
+**处理取消**
+
+TPL 在 .NET 4 引入了同意的取消模型，包含两个类型 CancellationTokenSource 和 CancellationToken。主要想法是你可以创建一个 CancellationTokenSource 然后获得一个 CancellationToken, 将它传递到异步操作种。你可以在源头发起一个取消操作，不过它作用在 token 上。有很多方法使用取消 token，但是最常见的方法是调用 ThrowIfCancellationRequested 方法，它会抛出一个 OeprationCanceledException 操作如果取消操作的确发生。在调用同步的方法的时候，同样的异常也会抛出。
+
+它们之间是如何叫交互的在 C# 说明种没有文档记录， 根据文档，如果一个匿名方法体抛出任何异常，返回的 task 将会进入 fault 状态。 但是在实际种，如果任何异步方法抛出 OperationCanceledException，则返回的方法将会以 Canceled 状态结束。你可以简单的通过抛出 OperationCanceledException 即可验证，而不用借助取消的 token。
+
+```C#
+static async Task ThrowCancellationException()
+{
+    throw new OpearationCanceledException();
+}
+...
+Task task = ThrowCancellationException();
+Console.WriteLine(task.Status);
+```
+
+输出结果表明是 Cancel 而不是 Faulted。如果你使用 Wait() 方法并且得到结果，这个异常仍然在 AggerateException 中，所以你没有必要显式的检查取消操作。
+
+重要的是，如果等待的操作已经取消了，原本的 OpeartionCanceledException 会被抛出。所以，除非你采取任何直接的措施，从异步方法中返回的 task 同样也会被取消。取消会被传递。
+
+到目前为止，我们已经覆盖了本章中最难的部分，还有一些功能需要取了解。但是它们非常容易理解。
+
+### 5.7 异步匿名函数
+
+正如它的名字一样，它是两种功能的组合：匿名函数和异步函数的组合，它允许你创建一个委托代表了异步操作。
+
+你可以创建异步匿名函数通过在其他匿名方法或者表达式添加上 async 标识符，下面是个例子：
+
+```C#
+Func<Task> lambda = async () => await Task.Delay(1000);
+Func<Task<int>> anonMethod = async delegate()
+{
+    Console.WriteLine("Started");
+    await Task.Delay(1000);
+    Console.WriteLine("Finished");
+    return 10;
+}
+```
+
+创建的委托的签名的返回类型必须要和异步方法想适应，和其他匿名函数一样可以捕获变量。异步操作只有启用的时候才会调用，多次调用创建多个操作。你不需要在异步匿名函数的结果使用 await。下面的代码就是简单的例子。
+
+```C#
+Func<int, Task<int>> function = async x => 
+{
+    Console.WriteLine("Start... x={0}", x);
+    await Task.Delay(x * 1000);
+    Console.WriteLine("Finished... x={0}, x");
+    return x *2;
+};
+Task<int> first = function(5);
+Task<int> second = fucntion(3);
+Console.WriteLine("First result: {0}", frist.Result);
+Console.WriteLine("Second result: {0}", second.Result);
+```
+
+我故意让第二个操作完成地更快一点，但是因为你要等待第一个完成之后才能打印，所以输出结果如下：
+
+```
+Starting... x=5
+Starting... x=3
+Finished... x=3
+Finished... x=5
+First result: 10
+Second result: 6
+```
+
+上面地结果和直接使用异步方法是一样地，到目前为止我使用异步方法超过异步匿名方法，但是它们也是非常有用地，尤其是 LINQ。但是你不能在 LINQ 查询表达式中，但是直接调用它们是有用的。因为异步函数不能返回 bool 型数据，所有不能再 Where 语句中使用它们。
+
+
+### 5.8 自定义任务类型
+
+再 C# 5 和 C# 6 中，异步函数只能返回 void，Task 和 Task<TResult>. 在 C# 7 中放宽了这个要求，它允许特定方法修饰地类型能够从异步函数中返回。
+
+作为提醒，异步地功能永远允许 await 模式地类型返回。而这里的新的功能允许异步方法返回自定义类型。
+
+同时提供了简单和复杂的版本，在复杂的版本中，你需要为你的返回类型做一些先前的工作，而简单的版本中，你只需要使用 ValueTask<TResult> 就可以了。
+
+#### 5.8.1 ValueTask<TResult>
+
+在写本书的狮虎，System.Threading.ValueTask<TResult> 已经存在于 netcaoreapp2.0 框架中，但是也可以从 System.Threading.Tasks.Extension Nuget 包中加载它们。
+
+ValueTask<TRsult> 非常容易描述，就跟 Task<TResult> 一样，不过是值类型。它也包含了一个 AsTask 方法允许你获取一个常规的 Task 类型（比如你想使用 Task.WhenAll 或者 Task.WhenAny 调用），但是大部分情况下，你就需要一个 Task 类型就行了。
+
+那么 ValueTask<TResult> 的好处是哪些呢？它的好处在于减少了堆分配和垃圾回收。Task<TResult> 是一个类，尽管基础框架复用了已经完成的 Task<TResult>，但是大部分异步方法会创建一个新的 Task<TResult> 对象，虽然在堆中分配一个对象并不需要太多担心，但是在性能要紧的条件下还是有点限制，所以使用 ValueTask<TResult> 可以避免分配的情况。
+
+如果异步方法使用 await 表达式还没有完成，对象分配是不可避免的。它将立即返回并且安排一个一个 continuation 来执行方法剩下的本分。这个在异步方法中非常常见，这样你的等待的操作还没有没有完成而你还在继续等待，那么 ValueTask<TResult> 并没有提供任何优势甚至还有点浪费。
+
+在一些场景下，已经完成的任务是大部分常见的情况，那么使用 ValueTask<TResult> 是非常有用的，为了证明它，让我们考虑一种现实世界的一种例子吧。如果没想每次从 System.IO.Stream 中每次读一个字节，并且异步的读取。你可简单地添加一个buffer 抽象来比卖你调用 ReadAsync 方法。但是你想添加一个异步方法来封装这个操作来从 stream 中生成一个 buffer。你可以使用 byte? 来表明你是否已经到达地尾部。这个方法非常容易写，但是每个分配一个 Task<byte?> 会增加 GC 的压力。使用 ValueTask<TResult>， 堆分配只会出现在你需要重新填充这个 buffer。
+
+```C#
+public sealed class ByteStream : IDisposable
+{
+    private readonly Stream stream;
+    private readonly byte[] buffer;
+    private int position;
+    private int bufferedBytes;
+
+    public ByteStream(Stream stream)
+    {
+        this.stream = stream;
+        buffer = new byte[1024 * 8];
+    }
+
+    public async ValueTask<byte?> ReadByteAsync()
+    {
+        if(position == bufferedBytes)
+        {
+            positon = 0;
+            bufferedBytes = awiat stream.ReadAsync(buffer, 0, buffer.Legnth).ConfigurationAwait(false);
+            if(bufferedBytes == 0)
+            {
+                return null;
+            }
+        }
+        return buffer[position++];
+    }
+    public void Dispose()
+    {
+        stream.Dispose();
+    }
+}
+
+using (var stream = new ByteStream(File.OpenReAd（"file.dat")))
+{
+    while((nextByte = await stream.ReadByteASync()).HasValue)
+    {
+        ConsumeByte(nextByte.Value);
+    }
+}
+```
+
+目前你可以先忽略 ConfiguraitonAwait 的调用。剩下的代码非常直接，没有 ValueTask<TResult> 也没有问题。只不过是不高效罢了。
+
+在这种情况下，大部 ReadByteAsync 方法并没有直接使用 await 操作，因为你已经缓存下来了。正如我之前解释过的，当你等待的操作已经完成了，执行的操作是同步的，这也就意味着你并不需要安排一个 continuation，从而避免了对象分配。
+
+这也是 Google.Protobuf 包中 CodeInputStream 中的简化版本。在显式世界中，每次阅读数据的一小部分，既可以同步也可以异步。将消息反序列话许多整数字段会引起很多方法调用。让每次调用同异步调用返回 Task<TResult> 是低效率的。
+
+对我们的大多数，在 C#7中使用 ValueTask<TResult> 作为异步方法的返回类型是非常有用的。但是 C# 7 中也提供了一个更通用的方式，允许你创建自己的返回类型。
+
+
+#### 5.8.2 构建你自己的返回类型
+
+我想强调一下，大部分情况下，你并不需要直到这些东西。而且我没打算提供超过 ValueTask<TResult> 的样例，因为任何我想出来的都显得难以理解，但是我不展示编译器所做的事情却又显得本书不完整。
+
+显然自定义的任务类型应当忙太祖 awaitable 模式，但是不仅仅局限这个。为了创造自定义任务类型，你需要编写一个对应的 builder type 加上使 System.Runtime.CompilerServcie.AsyncMethodBuilderAttirbute 让编译器直到两个类型之间的联系。这个特性同样作用于 ValueTask<TResult>。但是如果你不想额外的依赖， 你可以包含自己的这个属性的声明。编译器会接受这个。
+
+这个任务类型可以包含一个类型参数的泛型或者非泛型， 如果这是泛型的，这个类型必须是 await 类型中的 GetResult 类型。如果是非泛型，GetResult 必须是返回为 void 类型。而 builder 是否泛型和它们一致。
+
+编译器需要通过 builder 信息让异步方法和自定义类型关联起来， 你需要直到如何创建自定义个的类型。它需要直到如恶化创建自定义任务，传递结果或者异常，在 continuation的恢复过来。比起 awaitable 模式，你需要做的事情更多。
+
+```C#
+[AsyncMethodBuilder(typeof(CustomTaskBuilder<>))]
+public class CustomTask<T>
+{
+    public CustomTaskAwaiter<T> GetAwaiter();
+}
+
+public class CustomTaskAwaiter<T> : INotifyCompletion
+{
+    public bool IsCompleted{get;}
+    public T GetResult();
+    public void OnCompleted(Action contination);
+}
+
+public class CustomTaskBuilder<T>
+{
+    public static CustomTaskBuilder<T> Create();
+
+    public void Start<TStateMachine>(ref TStateMachine stateMachine)
+        where TStateMachine: IAsyncStateMachine;
+
+    public void SetStateMachine(IAsyncStateMachine stateMachine);
+    public void SetException(Exception exception);
+    public void SetResult(T result);
+
+    public void AwaitOnCompleted<TAwaiter, TStateMachine>
+        (ref TAwaiter awaiter, ref TStateMachine stateMachine)
+        where TAwaiter: INotifyCompletion
+        where TStateMachine: IAsyncStateMachine;
+
+    public void AwaitUnsafeOnCompleted<TAwaiter, TStateMachine>
+        (ref TAwaiter awaiter, ref TStateMachine stateMachine)
+        where TAwaiter: INotifyCompletion
+        where TStateMachine: IAsyncStateMachine;
+
+    public CustomTask<T> Task {get;}
+}
+```
+
+这部分代码展示的是自定义任务类型，对于非泛型而言，只需要在 builder 中 SetResult 是无参数的即可。
+
+有趣的一点是 AwaitUnsafeOnCompleted 方法，在下一章中你可以看到，编译器又 safe awaiting 和 unsafe awaiting 两个概念， 后者取决于需要等待的类型。自定义的 Task 类型需要处理上述的两种情况。
+
+最后再重复一遍，我并不希望你再生产环境中使用自定义任务类型，我想 ValueTask<TResult> 就足够了。
+
+
+### 5.9 异步主函数
+
+C# 对程序的入口 Main 函数的要求已经存在很长时间了
+- 函数名必须是 Main
+- 必须是静态的
+- 必须是 void 或者 int 返回值
+- 必须是无参数或者 string[] 类型的参数
+- 必须是非泛型的，定义再一个非泛型的类型中
+- 部分是 partial 修饰的方法
+- 不能又 async 描述符
+
+再 C# 7.1 中，最后一个要求被去掉了，所以你可以写一个异步的入口，仍然叫做 Main 而不是 MainAsync，但是返回类型是 Task 或者 Task<int>，这个和同步方法中 void 和 int 相对应。不同于大部分异步方法，异步入口不能返回 void 或者自定义任务类型。
+
+除此之外，这就是一个普通的异步方法，举个例子，下图就是展示了异步的入口
+
+```C#
+static async Task Main()
+{
+    Console.WriteLine("Before Delay");
+    await Task.Delay(1000);
+    Console.WriteLine("After Delay");
+}
+```
+
+编译器通过创建一个同步的封装方法来处理异步的入口，封装的方法既可以无参数，也可以是接受 string[] 参数；既可以返回 void，也可以返回 int，这个取决于异步入口的形式。封装的方法调用真正的方法的 GetAwaiter() 或者任务，然后调用 GetResult 方法获取结果，下面就是封装的方法示例。
+
+```C#
+static void <Main>()
+{
+    Main().GetAwaiter().GetResult();
+}
+```
+
+这些就是从语言角度来看，异步的所有功能，知道并不等于能够高效的使用它们，尤其是对于异步而言。
+
+### 5.10 使用建议
+
+这一节不是一个完整的高效使用异步的建议，因为这一节太长了，我猜大部分读者差不多忘记了这一节部分内容。我强烈建议阅读 Stephen Cleary 和 Stephen Toub 相关的博客文章，他们从很多角度深度地讨论过这这个问题。
+
+#### 5.10.1 使用 ConfigureAwait 避免上下文捕获
+
+再 5.2.2 和 5.6.2 小节中，我描述过 synchronization 上下文在 await 操作符上的作用。 举个例子俩将，比如你在 WPF 或者 window form 应用程序中使用 UI 线程中等待一个异步操作，UI syncrhonization 上下文和异步基础框架能够保证 continuation 能够在运行完 await 操作后继续在同一个 UI 线程上运行，这样能够保证这些能够能够正确访问 UI 内容。
+
+但是如果你在写一个library或者是并不修改UI的应用程序，你并不像后来再回到UI线程。通常来讲，运行再 UI 线程上的代码越少越好。这样能够保证 UI 更好的响应用户请求。当然，如果你显得是 UI库，你当让希望回到 UI 线程上继续处理。但是大部分库是关于业务逻辑，web 应用程序，或者数据库访问，这些都不需要回到 UI 线程。
+
+ConfigureAwait 方法是针对这个目的设计的，它接受一个参数来决定返回的 awitable 是否捕获当前的上下文。再实际中，都是传递 false 这个参数。在库代码中，你不能写这样的代码：
+
+```C#
+static async Task<int> GetPageLengthAsync(string url)
+{
+    var fetchTextTask = client.GetStringAsync(url);
+    int length = (await fetchTextTask).Length;
+    return length;
+}
+```
+
+你需要调用 ConfigureAwait(false) 在任务返回的时候，然后等待结果
+
+```C#
+static async Task<int> GetPageLengthAsync(string url)
+{
+    var fetchTextTask = client.GetStringAsync(url).ConfiguraAwait(false);
+    int length = (await fetchTextTask).Length;
+    return length;
+}
+```
+
+在这里我做了一个改变，在第一个例子中 fetchTextTask 的类型是 Task<int>, 而在第二个例子中为 ConfigurationTaskAwaitable<int>。不过我看过的大部分代码是这届等待结果，就跟这样
+
+```C#
+string text = await client.GetStringASync(url).ConfiguraitonAwait(false);
+```
+
+调用 ConfigureAwait(false) 的作用是 continuation 将不会再安排到原先的 synchronizaiton 上下文中。它将会再线程池中的线程执行。如果这个异步任务已经完成，方法的 continuation将会同步执行下去。即使又 ConfigureAwait(false)。因此每个库中的每个异步代码都应该这样配置。 你不能仅仅调用 ConfigureAwait(false) 在异步方法中第一个任务，然后依赖剩下的代码在线程池中执行。
+
+这些你在编写库代码的时候要特别小心，我期待更好的解决方案，但是目前，你需要对这一块要特别警觉。我推荐使用 Roslyn 分析工具来分析你是否忘了为某个任务家上 configureAwait(false)。这里我推荐使用 ConfigureAwaitChecker.Analyzer Nuget 包来帮助你。
+
+万一你担心这个会对调用者又什么影响，我想这不是必要的。假设调用者等待一个从 GetPageLengthAsync返回的任务，然后更新 UI 来展示结果。尽管 Get-PageLengthAsync 中的 continuation 执行在线程池中，但是更新 UI 代码的内容会被 UI 上下文捕获，然后执行在 UI 线程中。
