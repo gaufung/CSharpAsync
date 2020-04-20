@@ -1000,3 +1000,195 @@ public async Tesk FooAsync()
 总体来讲，我们会假设 C# 编译器会将使用 async/await 的代码转换为不是用 async/await 的代码。当然，编译器可以操作更低级的代码，就跟 IL 代码类似。实际上在 async/await 角度来讲，IL 生成的代码病不能用正常的 C# 代码表示，但是这个能够解释问题了。
 
 生成的代码就想剥洋葱，层次越深，复杂度越高。我们将会从最外面开始，逐个往里面进发。await 表达式，awaiter 和 continuation 和合作。为了简单起见，我将展示异步方法，而不是异步匿名函数。两者的机制差不多，所以没必要做重复两件同样的事情。
+
+### 6.1 生成代码的结构
+正如我在第 5 章提到的，实现方式主要有状态机。编译器会生成私有的嵌套的结构来表示异步方法，但是它必须有一个你已经声明相同的方法签名，我叫它跟方法。
+
+这个状态机记录了你在异步方法中到达了哪一步。逻辑上将，有四种状态，通常执行的顺序是
+- 未开始
+- 执行
+- 暂停
+- 完成
+
+只有暂停的状态取决于异步方法的结构，方法中的每一个 await 表达式都有一个特定的表达式返回，来触发更多的执行。当状态机在执行，它不需要记录每个执行的代码。这个时候就是普通的正常的代码，CPU 记录代码指针就跟同步代码一样。当状态机需要暂停的时候，状态会被记录下来。主要目的是为了让代码能够继续执行下去。
+
+![](./images/state_machine_exec.png)
+
+上图展示了不同的状态之间的转移。
+
+让我以具体的例子来说明，下面的代码展示了简单的异步方法。
+
+```C#
+static async Task PrintAndWait(TimeSpan delay)
+{
+    Console.WriteLine("Before first delay");
+    await Task.Delay(delay);
+    Console.WriteLine("Between delay");
+    await Task.Delay(delay);
+    Console.WriteLine("After second delay");
+}
+```
+
+有三点需要注意一下：
+- 在状态机中有个参数
+- 这个方法中包含了两个 await 表达式
+- 这个方法发挥了 Task， 所以你需要在完成最后一行之后返回 Task，但是没有特殊的结果。
+
+这个非常简单，没有循环，try/catch/finally 等等语句块。除了 await， 控制流也非常简单。让我们扣篮看编译器生成了怎样的代码。
+
+使用合适的工具，你可以将上述的代码转换为下面的代码。编译器大部分生成的代码都不是合法的 C# 代码。我已经重写了部分代码让它们成为有效的标识符以便能让代码运行起来。 在其他情况下，我们修改标识符以便让代码可读。本质上讲，这和生成代码相同，但是更容易阅读。其他地方，我甚至在两种条件上使用 switch 语句， 而编译器可能选择更高效的 if/else 语句。换句话说，switch 语句代表了更通用的语句。 但是编译器可以生成更简单的代码对于简单的情况。
+
+```C#
+[AsyncStateMachine(typeof(PrintAndWaitStateMachine))]
+[DebuggerStepThrough]
+private static unsafe Task PrintAndWait(TimeSpan delay)
+{
+    var machine = new PrintAndWaitStateMachine
+    {
+        delay = delay,
+        builder = ASyncTaskMethodBuilder.Create(),
+        state = -1
+    };
+    machine.builder.start(ref machine);
+    return machine.buidler.Task;
+}
+
+[CompilerGenerated]
+private struct PrintAdnWaitStateMachine : IAsyncStateMachine
+{
+    public int state;
+    public AsyncTaskMethodBuilder builder;
+    private TaskAwaiter awaiter;
+    public TimeSpan delay;
+    void IAsyncStateMachine.MoveNext()
+    {
+
+    }
+
+    [DebuggerHidder]
+    void IAsyncStateMachine.SetStateMachine(IAsyncStateMachine stateMachine)
+    {
+        this.builder.SetStateMachine(stateMachine);
+    }
+}
+```
+
+这个代码看上去也够复杂的了，，但是我想提醒的是大部分工作是在 MoveNext 方法中完成的。目前我已经将部分实现移除掉了。 上述的代码主要是为了提供全局的概览然后以便你进入 MoveNext 方法的实现。我们来依次看看上述的带啊吗，从跟方法开始。
+
+#### 6.1.1 根方法：准备和开始第一步
+
+根方法就是包含的 AsyncTaskMethodBuilder 方法，这是一个值类型，这是异步框架中最通用的方法，你可以看到在本章的后面看到状态机和这个builder交互。
+
+```C#
+[AsyncStateMachine(typeof(PrintAndWaitStateMachine))]
+[DebuggerStepThrough]
+private static unsafe Task PrintAndWait(TimeSpan delay)
+{
+    var machine = new PrintAndWaitStateMachine
+    {
+        delay = delay,
+        builder = ASyncTaskMethodBuilder.Create(),
+        state = -1
+    };
+    machine.builder.start(ref machine);
+    return machine.buidler.Task;
+}
+```
+
+方法的属性只不过是对于工具用的，对正常的代码执行没有任何影响，所以你没有必要了解其中的细节。状态机必须在根方法中创建，包含下面三个参数
+- 任何参数作为状态机的一个字段
+- builder 取决于异步方法的返回值
+- 最初的状态为 -1
+
+在创建状态机之后，根方法要求状态机的 builder 来启动它，通过引用的方式传递给它。在接下来你会看到很多引用传递的方式，主要是为了效率和一致性。现在状态机和 AsyncTaskMethodBuilder 都是可以变的值类型。将 machine 以引用的形式传递给 Start 方法避免了拷贝状态，这就保证了在 Start 中的任何改变都是可见的。这也是为什么你使用 machine.builder 同时作用域 Start 调用和 Task 任务的返回。假设你将 machine.builder 拆分成局部变量，就像这样：
+
+```C#
+var  builder = machine.builder;
+builder.Start(ref machine);
+return buidler.Task;
+```
+用这样的代码话，在 builder.Start() 中状态的修改将不会冲 machine.builder 中看到，反之亦然，因为它是 builder 的一个拷贝副本。这也是重要的一点就是 machine.builder 指向的一个字段，而不是属性。你不行操作builder的一个拷贝，而是你想直接操作state machine 中包含的值。这些细节你不需要自己来处理，这也是为甚恶魔可变类型包含一个公共字段是一个错误的注意。
+
+开始一个状态机并不是创建了一个新的线程，它仅仅是调用的状态机的 MoveNext 方法知道状态机需要暂停等待其他异步的操作完成。换句话说，这是第一步。同样， MoveNext() 返回后，也就是说 machine.builder.Start() 返回，你可以返回一个任务代表全局的异步操作给调用者。builder的职责就是创建一个任务，并且保证状态在异步方法中正确改变。
+
+这就是根方法，现在我们看看状态机本身。
+
+#### 6.1.2 状态机结构
+
+我仍然忽视了状态机的大部分代码（在 MoveNext() 中）， 但是提醒一下结构的类型。
+
+```C#
+[CompilerGenerated]
+private struct PrintAdnWaitStateMachine : IAsyncStateMachine
+{
+    public int state;
+    public AsyncTaskMethodBuilder builder;
+    private TaskAwaiter awaiter;
+    public TimeSpan delay;
+    void IAsyncStateMachine.MoveNext()
+    {
+
+    }
+
+    [DebuggerHidder]
+    void IAsyncStateMachine.SetStateMachine(IAsyncStateMachine stateMachine)
+    {
+        this.builder.SetStateMachine(stateMachine);
+    }
+}
+```
+
+同样的，这里的属性同样也不重要，重要的部分如下
+- 它实现了 IAsyncStateMachine 接口，它是基础框架使用的，这个接口只有两个展示的两个方法
+- 字段，用来存储状态机需要记住的上一步和下一步直接的状态。
+- MoveNext 方法，状态机没启动一次就调用一次，每次暂停之后就被唤醒
+- SetStateMachine 方法，有同样的实现方式。
+
+你已经看到了实现 IAsyncStateMachine 接口类型的使用。 尽管还有以下是隐藏着的，AsyncTaskMethodBuilder.Start() 是一个泛型方法，包含一个约束是类型参数必须事项 IAsyncStateMachine 接口。做一些清理之后，Start 方法调用 MoveNext 方法来去确保状态机执行异步方法的第一步。
+
+这些字段可以广义上分为下面五种
+- 当前状态
+- 方法的 builder 用来和异步框架沟通并且提供返回的 Task
+- Awaiter
+- 参数和局部变量
+- 临时栈变量
+
+state 和 builder 是相对简单，state 是一个证书对应着下面的值
+- 1： 没有开始，或者正在执行
+- 2： 完成（成功或者失败）
+- 其他任何值，在特定的 await 表达式暂停
+
+正如我之前提到的，builder 的类型取决异步方法的返回值。在 C# 7 之前，builder 的类型总是 `AsyncVoidMethodBuilder`, `AsyncTaskMethodBUilder` 和 `AsyncTaskMethodBuilder<T>`。在 C# 7 和自定义 Task 类型，builder 类型是由 AsyncTaskMethodBuidlerAttribute 指定到自定义类型上。
+
+其他的字段取决于异步方法的体，编译器尽可能地最少的字段。 重点是它要记得你需要的字段是你从某个时候返回来恢复状态机所需要的。有时候编译器因为多种原因使用这些字段，但是有时候可以完全忽略它。
+
+第一个例子是编译器是如何通过 awaiter 复用这些字段，每次只有一个awaiter 相关，因为任何特定地状态机一次只能等待一个值。编译器每个 awiater 创建一个字段。如果你等待两个 `Task<int>` 值，一个 `Task<string>` 和单个非泛型地 Task 在一个异步方法中，你最终会得到三个字段，一个 `TaskAwaiter<int>`, 一个 `TaskAwaiter<string>` 和非泛型地 `TaskAwaiter`。编译器会使用字段正确地字段为每个 await 表达式基于awaiter 类型。
+
+接下来我们考虑局部变量，编译器没有重用这些字段而是全部忽略了它们。如果一个局部变量只在两个await 表达式之间使用，而没有跨 await 表达式，它可以将局部变量保存在 MoveNext 中。
+
+下面地例子更清楚的表达我的意思，考虑下面的异步方法：
+
+```C#
+public async Task LocalVariableDemoAsync()
+{
+    int x = DateTime.UtcNow.Second;
+    int y = DateTime.UtcNow.Second;
+    Console.WriteLine(y);
+    await Task.Delay();
+    Console.WriteLine(x);
+}
+```
+
+编译器之后为 x 创建一个字段，因为这个只需要在状态机暂停后保存下来。但是 y 在执行的时候仅仅是栈上的局部变量。
+
+最后，这里有临时栈变量。它们会在 await 表达式作为更大表达式的一部分或者中间值被记住。在刚刚的例子中没有这种临时栈变量，这也是为什么只有四个字段：状态，builder，awaiter 或者参数。举个例子如下：
+
+```C#
+public async Task TemporaryStackDemoAsync()
+{
+    Task<int> task = Task.FromResult(10);
+    DateTime now = DateTime.UtcNow;
+    int result = now.Second + now.Hours * await task;
+}
+```
+
