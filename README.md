@@ -1192,3 +1192,63 @@ public async Task TemporaryStackDemoAsync()
 }
 ```
 
+因为在一个异步方法中，C#  为操作数执行的规定没有改变。 now 的属性 Second 和 Hours 都要在等待之后执行。所以它们的结果需要记住它们以便在后面的算术计算中使用它们，这个是在状态机恢复之后。所以这就一位置需要创建这个字段。
+
+你可以想编译器重写这部分代码，引入了额外的局部变量。
+
+```C#
+public async Task TemporaryStackDemoAsync()
+{
+    Task<int> task = Task.FromResult(10);
+    DateTime now = DateTime.UtcNow;
+    int temp1 = now.Second;
+    int temp2 = now.Hours;
+    int result = temp1 + temp2 * await task;
+}
+```
+
+现在局部变量变成了字段，不同于真正的局部变量。编译器复用了栈中同样类型的变量，只生成它需要的字段。
+
+现在已经解释了状态机中全部的字段，下一步，你需要看看 MoveNext() 方法，只不过是概念的开始
+
+#### 6.1.3 MoveNext 方法（高层次）
+
+我不想展示之前代码中 MoveNext 反编译后的代码，因为非常长。在你知道了控制流之后，这就容易多了。所以我将以抽象的角度来描述它。
+
+每次 MoveNext 被调用后， 状态机会执行下一步。 每次它到达一个 await 表达式，如果它的任务已经完成了， 就继续执行。否则就暂停。MoveNext 在下面情况下返回：
+- 状态机需要暂停以等待未完成的任务
+- 执行到方法的最后或者 retrun 语句
+- 一个未捕获的异常抛出
+
+注意最后一种情况，MoveNext 方法并没有以抛出异常结束，而是将这个异步调用关联的 Task 的状态设置为 faulted。 
+
+下图就是异步方法中的一般流程，主要关注在 MoveNext 方法，在这张图中并没有包含异常处理，因为流程图无法表示出 try/catch 块。 
+![](./image/../images/state_machine_move_next.png)
+
+在这张图中我没有展示 SetStateMachine 调用，因为这张图已经够复杂的了。
+
+最后一点要注意的是，MoveNext 方法的返回类型是 void，而不是 Task 类型。只有根方法需要返回 task，那是从状态机中的 builder 中获取，即调用 Start() 再调用 MoveNext 之后的第一步返回。其他调用 MoveNext 是作为基础框架的状态机从暂停状态恢复的时候。这不需要关联一个 task， 在 6.2 小节你会看到这样的代码，首先要简单介绍 SetStateMachine.
+
+#### 6.1.4 SetStateMachine 方法和状态机
+
+我已经展示了 SetStateMachine 方法，非常简单
+
+```C#
+void IAsyncStateMachine.SetStateMachine(IAsyncStateMachine stateMachine)
+{
+    this.builder.SetStateMachine(stateMachine);
+}
+```
+
+在 release 版本中实现和这个一样，这个方法的目的是从高层来解释。当状态机执行第一步，它和根方法中的局部变量一样在栈中保存，如果它暂停了，它需要将自己装箱起来起来放到堆中。 所以所有的信息在恢复的时候保持原样。在它装箱之后，SetStateMachine 被装箱之后的值调用，使用装箱之后的值作为参数。换句话说，更深入地了解框架，你会发现代码是这样的
+
+```C#
+void BoxAdnRemember<TStateMachine>(ref TStateMachine stateMachine)
+    where TStateMachine: IStateMachine
+{
+    IStateMachine boxed = stateMachine;
+    boxed.SetStateMachine(boxed);
+}
+```
+
+实际上并不是这么简单，但是它表达出想要地意思。
