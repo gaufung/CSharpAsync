@@ -1251,4 +1251,92 @@ void BoxAdnRemember<TStateMachine>(ref TStateMachine stateMachine)
 }
 ```
 
-实际上并不是这么简单，但是它表达出想要地意思。
+实际上并不是这么简单，但是它表达出想要地意思。SetStateMachine 地实现去报 AsynTaskMethodBuilder 有一个引用版本地装箱值。 这个方法会被在装箱的值中调用。如果不是装箱的值调用，那么就不会影响装箱值。这样确保了当 continuation 的委托被传递到 awaiter 中，它会使用同样的装箱实例调用 MoveNext 方法。 
+
+结果就是状态机会在不必要的时候不去装箱，只在需要的时候。在装箱之后，所有的操作都在装箱的版本中。
+
+我在发现异步机制的时候发现了有趣的代码， 它听上去没有意义。但是因为装箱的工作变得有必要。通过装箱来在暂停的时候保存信息。
+
+不理解这部分代码也没有关系。 如果你发现自己在这个层次 debug 代码，可以再次回到本小节。这就是 StateMachine 保存的全部，剩下的都是关于 MoveNext 方法。
+
+### 6.2 简单的 MoveNext 实现
+
+接下来以 6-1 中的异步方法为例，并不是因为它简单，而是不包含循环，try 语句或者 using 语句。它有简单的控制流，可以带来简单的状态机。
+
+#### 6.2.1 一个具体的例子
+
+我将一个完整的方法开始，不要期待它代表任何事情，就简单花点时间浏览一下。拥有了具体的例子，更通用的结构就更容易理解，以为你可以回过来看看每一部分是如何对应到这个例子中的。我将再一次重复一下 6-1 中的例子。
+
+```C#
+static async Task PrintAndWait(TimeSpan delay)
+{
+    Console.WriteLine("Before first delay");
+    await Task.Delay(delay);
+    Console.WriteLine("Between dealy");
+    await Task.Delay(delay);
+    Console.WriteLine("After second delay");
+}
+```
+
+下面的代码就是反编译后的代码，不过重写了一下以便更容易阅读。
+
+```C#
+void IAsyncStateMachine.MoveNext()
+{
+    int num = this.state;
+    try
+    {
+        TaskAwait awaiter1;
+        switch(num)
+        {
+            default:
+                goto MethodStart;
+            case 0:
+                goto FirstAwaitContinuation;
+            case 1:
+                goto SecondAwiatContinuation;
+        }
+    MethodStart:
+        Console.WriteLine("Before first dealy");
+        awaiter1 = TAsk.Delay(this.delay).GetAwaiter();
+        if(awaiter1.IsCompleted)
+        {
+            goto GetFirstAwaiterResult;
+        }
+        this.state = num = 0;
+        this.awaiter= awaiter1;
+        this.builder.AwaiterUnsafeOnCompleted(ref awaiter1, ref this);
+        return;
+    FirstAwaiterContination:
+        awaiter1 = this.awaiter;
+        this.awaiter= defaulter(TaskAwaiter);
+        this.statat = num = -1;
+    GetFirstAwaiterResult:
+        awaiter1.GetResult();
+        Console.WriteLine("Between dealy");
+        TaskAwaiter awaiter2 = Task.Delay(this.delay).GetAwaiter();
+        if(awaiter2.IsCompleted)
+        {
+            goto GetSecondAwaiterResult;
+        }
+        this.state = num = 1;
+    SecondAwaitContinuation:
+        awaiter2 = this.awaiter;
+        this.awaiter = default(TaskAwaiter);
+        this.state = num = -1;
+    GetSecondAwaitResult:
+        awaiter2.GetResult();
+        console.WriteLine("After second delay");
+    }
+    catch(Exception exception)
+    {
+        this.state = -2;
+        this.builder.SetException(exception);
+        return;
+    }
+    this.state = -2;
+    this.builder.SetResult();
+}
+```
+
+代码有点多，你可以看到好多 goto 语句和代码标签，这个很少再手写的代码中看得到。此刻我想这个有点难以理解，但是我想以这个具体的例子开始，你可以再任何使用引用它们。接下来我将它们拆分成更通用的结构，然后是特定的 awiat 表达式。在本小节结束的时候，这部分代码可能看上去更加难以理解。但是你会从不同的角度来了解为什么是这样的。
