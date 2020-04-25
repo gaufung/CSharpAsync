@@ -991,15 +991,15 @@ public async Tesk FooAsync()
 - 理解执行上下文在 await 表达式
 - 与用户自定义的任务类型交互
 
-我仍然生动地记得 2010 年 10 月 28 号晚上， Anders Hejlsberg 正在 PDC 上介绍 aysnc/await 中的特性， 在他演讲之前，大量的可下载的材料已经可用了，主要有C# 说明的改变的草稿，社区技术预览版的 C# 5 编译器。正在 Anders 正在演讲的时候，我边看边看这完这个slide。在 Anders 演讲结束后，我已经写完异步代码并且运行起来。
+我仍然生动地记得 2010 年 10 月 28 号晚上， Anders Hejlsberg 正在 PDC 上介绍 aysnc/await 中的特性， 在他演讲之前，大量的可下载的材料已经可用了，主要有C# 说明的改变的草稿，社区技术预览版的 C# 5 编译器。正在 Anders 正在演讲的时候，我边看这个slide 边尝试去做。在 Anders 演讲结束后，我已经写完异步代码并且运行起来。
 
-在接下来几周，我开始讨论这个并且看看编译器到底生成的代码，并且尝试编写我自己简单的版本实现来达到 CTP 的版本，并且从不同的角度来看看其中的奥秘。随着新版本出来，我逐步去了解有什么新的变化，并且逐渐了解到后面发生了什么。看的越多，我越欣赏编译器在背后所做的工作。就好像在用显微镜在看一朵花，非常漂亮而且值得欣赏，但是还比你第一眼看到的还要做。
+在接下来几周，我开始讨论这个并且看看编译器到底生成的代码，并且尝试编写我自己简单的实现来达到 CTP 的版本效果，并且从不同的角度来看看其中的奥秘。随着新版本出来，我逐步去了解有什么新的变化，并且逐渐了解到后面发生了什么。看的越多，我越欣赏编译器在背后所做的工作。就好像在用显微镜在看一朵花，非常漂亮而且值得欣赏，但是还比你第一眼看到的还要做。
 
 并不是所有人都跟我一下，当然，如果你仅仅想依赖我之前所描述的行为，你可以很自然的相信编译器所做的事情，完全没问题。同样的，如果你跳过这一章也是没有问题。这也不可能你将来会到这一层代码来进行调试。当时我相信这一章会让你进一步了解 async/await 是如何工作的。同样当你看完生成的代码， awaitable 模式和用户自定义任务类型看上去更加合理。我不想让这个看上去更加神秘，但是语言和开发者的能力肯定有一定的联系，如果你能学习实现的细节。
 
-总体来讲，我们会假设 C# 编译器会将使用 async/await 的代码转换为不是用 async/await 的代码。当然，编译器可以操作更低级的代码，就跟 IL 代码类似。实际上在 async/await 角度来讲，IL 生成的代码病不能用正常的 C# 代码表示，但是这个能够解释问题了。
+总体来讲，我们会假设 C# 编译器会将使用 async/await 代码转换为不用 async/await 的代码。当然，编译器可以操作更低级的代码，就跟 IL 代码类似。实际上在 async/await 角度来讲，IL 生成的代码并不能用正常的 C# 代码表示，但是这个能够解释问题了。
 
-生成的代码就想剥洋葱，层次越深，复杂度越高。我们将会从最外面开始，逐个往里面进发。await 表达式，awaiter 和 continuation 和合作。为了简单起见，我将展示异步方法，而不是异步匿名函数。两者的机制差不多，所以没必要做重复两件同样的事情。
+生成的代码就像剥洋葱，层次越深，复杂度越高。我们将会从最外面开始，逐个往里面进发。await 表达式，awaiter 和 continuation 和合作。为了简单起见，我将展示异步方法，而不是异步匿名函数。两者的机制差不多，所以没必要做重复两件同样的事情。
 
 ### 6.1 生成代码的结构
 正如我在第 5 章提到的，实现方式主要有状态机。编译器会生成私有的嵌套的结构来表示异步方法，但是它必须有一个你已经声明相同的方法签名，我叫它跟方法。
@@ -1034,9 +1034,9 @@ static async Task PrintAndWait(TimeSpan delay)
 - 这个方法中包含了两个 await 表达式
 - 这个方法发挥了 Task， 所以你需要在完成最后一行之后返回 Task，但是没有特殊的结果。
 
-这个非常简单，没有循环，try/catch/finally 等等语句块。除了 await， 控制流也非常简单。让我们扣篮看编译器生成了怎样的代码。
+这个非常简单，没有循环，try/catch/finally 等等语句块。除了 await， 控制流也非常简单。让我们看看编译器生成了怎样的代码。
 
-使用合适的工具，你可以将上述的代码转换为下面的代码。编译器大部分生成的代码都不是合法的 C# 代码。我已经重写了部分代码让它们成为有效的标识符以便能让代码运行起来。 在其他情况下，我们修改标识符以便让代码可读。本质上讲，这和生成代码相同，但是更容易阅读。其他地方，我甚至在两种条件上使用 switch 语句， 而编译器可能选择更高效的 if/else 语句。换句话说，switch 语句代表了更通用的语句。 但是编译器可以生成更简单的代码对于简单的情况。
+使用合适的工具，你可以将上述的代码转换为下面的代码。编译器大部分生成的代码都不是合法的 C# 代码。我已经重写了部分代码让它们成为有效的标识符以便能让代码运行起来。 在其他情况下，我们修改标识符以便让代码可读。本质上讲，这和生成代码相同，但是更容易阅读。其他地方，我甚至在两种条件上使用 switch 语句， 而编译器可能选择更高效的 if/else 语句。换句话说，switch 语句代表了更通用的语句，但是编译器可以生成更简单的代码对于简单的情况。
 
 ```C#
 [AsyncStateMachine(typeof(PrintAndWaitStateMachine))]
@@ -1073,7 +1073,7 @@ private struct PrintAdnWaitStateMachine : IAsyncStateMachine
 }
 ```
 
-这个代码看上去也够复杂的了，，但是我想提醒的是大部分工作是在 MoveNext 方法中完成的。目前我已经将部分实现移除掉了。 上述的代码主要是为了提供全局的概览然后以便你进入 MoveNext 方法的实现。我们来依次看看上述的带啊吗，从跟方法开始。
+这个代码看上去也够复杂的了，，但是我想提醒的是大部分工作是在 MoveNext 方法中完成的。目前我已经将部分实现移除掉了。上述的代码主要是为了提供全局的概览然后以便你进入 MoveNext 方法的实现。我们来依次看看上述的代码，先从跟方法开始。
 
 #### 6.1.1 根方法：准备和开始第一步
 
@@ -1107,7 +1107,7 @@ var  builder = machine.builder;
 builder.Start(ref machine);
 return buidler.Task;
 ```
-用这样的代码话，在 builder.Start() 中状态的修改将不会冲 machine.builder 中看到，反之亦然，因为它是 builder 的一个拷贝副本。这也是重要的一点就是 machine.builder 指向的一个字段，而不是属性。你不行操作builder的一个拷贝，而是你想直接操作state machine 中包含的值。这些细节你不需要自己来处理，这也是为甚恶魔可变类型包含一个公共字段是一个错误的注意。
+用这样的代码话，在 builder.Start() 中状态的修改将不会冲 machine.builder 中看到，反之亦然，因为它是 builder 的一个拷贝副本。这也是重要的一点就是 machine.builder 指向的一个字段，而不是属性。你不行操作builder的一个拷贝，而是你想直接操作state machine 中包含的值。这些细节你不需要自己来处理，这也是为什么在可变类型包含一个公共字段是一个错误的主意。
 
 开始一个状态机并不是创建了一个新的线程，它仅仅是调用的状态机的 MoveNext 方法知道状态机需要暂停等待其他异步的操作完成。换句话说，这是第一步。同样， MoveNext() 返回后，也就是说 machine.builder.Start() 返回，你可以返回一个任务代表全局的异步操作给调用者。builder的职责就是创建一个任务，并且保证状态在异步方法中正确改变。
 
@@ -1153,18 +1153,18 @@ private struct PrintAdnWaitStateMachine : IAsyncStateMachine
 - 参数和局部变量
 - 临时栈变量
 
-state 和 builder 是相对简单，state 是一个证书对应着下面的值
+state 和 builder 是相对简单，state 是一个状态对应着下面的值
 - 1： 没有开始，或者正在执行
 - 2： 完成（成功或者失败）
 - 其他任何值，在特定的 await 表达式暂停
 
 正如我之前提到的，builder 的类型取决异步方法的返回值。在 C# 7 之前，builder 的类型总是 `AsyncVoidMethodBuilder`, `AsyncTaskMethodBUilder` 和 `AsyncTaskMethodBuilder<T>`。在 C# 7 和自定义 Task 类型，builder 类型是由 AsyncTaskMethodBuidlerAttribute 指定到自定义类型上。
 
-其他的字段取决于异步方法的体，编译器尽可能地最少的字段。 重点是它要记得你需要的字段是你从某个时候返回来恢复状态机所需要的。有时候编译器因为多种原因使用这些字段，但是有时候可以完全忽略它。
+其他的字段取决于异步方法体，编译器尽可能地最少的字段。重点是它要记得你需要的字段是从某个时候返回来恢复状态机所需要的。有时候编译器因为多种原因使用这些字段，但是有时候可以完全忽略它。
 
-第一个例子是编译器是如何通过 awaiter 复用这些字段，每次只有一个awaiter 相关，因为任何特定地状态机一次只能等待一个值。编译器每个 awiater 创建一个字段。如果你等待两个 `Task<int>` 值，一个 `Task<string>` 和单个非泛型地 Task 在一个异步方法中，你最终会得到三个字段，一个 `TaskAwaiter<int>`, 一个 `TaskAwaiter<string>` 和非泛型地 `TaskAwaiter`。编译器会使用字段正确地字段为每个 await 表达式基于awaiter 类型。
+第一个例子是编译器是如何通过 awaiter 复用这些字段，每次只有一个 awaiter 相关，因为任何特定地状态机一次只能等待一个值。编译器每个 awiater 创建一个字段。如果你等待两个 `Task<int>` 值，一个 `Task<string>` 和单个非泛型地 Task 在一个异步方法中，你最终会得到三个字段，一个 `TaskAwaiter<int>`, 一个 `TaskAwaiter<string>` 和非泛型地 `TaskAwaiter`。编译器会使用字段正确地字段为每个 await 表达式基于awaiter 类型。
 
-接下来我们考虑局部变量，编译器没有重用这些字段而是全部忽略了它们。如果一个局部变量只在两个await 表达式之间使用，而没有跨 await 表达式，它可以将局部变量保存在 MoveNext 中。
+接下来我们考虑局部变量，编译器没有重用这些字段而是全部忽略了它们。如果一个局部变量只在两个 await 表达式之间使用，而没有跨 await 表达式，它可以将局部变量保存在 MoveNext 中。
 
 下面地例子更清楚的表达我的意思，考虑下面的异步方法：
 
@@ -1179,7 +1179,7 @@ public async Task LocalVariableDemoAsync()
 }
 ```
 
-编译器之后为 x 创建一个字段，因为这个只需要在状态机暂停后保存下来。但是 y 在执行的时候仅仅是栈上的局部变量。
+编译器之后为 x 创建一个字段，因为这个需要在状态机暂停后保存下来。但是 y 在执行的时候仅仅是栈上的局部变量。
 
 最后，这里有临时栈变量。它们会在 await 表达式作为更大表达式的一部分或者中间值被记住。在刚刚的例子中没有这种临时栈变量，这也是为什么只有四个字段：状态，builder，awaiter 或者参数。举个例子如下：
 
@@ -1192,7 +1192,7 @@ public async Task TemporaryStackDemoAsync()
 }
 ```
 
-因为在一个异步方法中，C#  为操作数执行的规定没有改变。 now 的属性 Second 和 Hours 都要在等待之后执行。所以它们的结果需要记住它们以便在后面的算术计算中使用它们，这个是在状态机恢复之后。所以这就一位置需要创建这个字段。
+因为在一个异步方法中，C# 为操作数执行的规定没有改变。 now 的属性 Second 和 Hours 都要在等待之后执行。所以它们的结果需要记住它们以便在后面的算术计算中使用它们，这个是在状态机恢复之后。所以这就一位置需要创建这个字段。
 
 你可以想编译器重写这部分代码，引入了额外的局部变量。
 
@@ -1223,6 +1223,7 @@ public async Task TemporaryStackDemoAsync()
 注意最后一种情况，MoveNext 方法并没有以抛出异常结束，而是将这个异步调用关联的 Task 的状态设置为 faulted。 
 
 下图就是异步方法中的一般流程，主要关注在 MoveNext 方法，在这张图中并没有包含异常处理，因为流程图无法表示出 try/catch 块。 
+
 ![](./image/../images/state_machine_move_next.png)
 
 在这张图中我没有展示 SetStateMachine 调用，因为这张图已经够复杂的了。
@@ -1240,7 +1241,7 @@ void IAsyncStateMachine.SetStateMachine(IAsyncStateMachine stateMachine)
 }
 ```
 
-在 release 版本中实现和这个一样，这个方法的目的是从高层来解释。当状态机执行第一步，它和根方法中的局部变量一样在栈中保存，如果它暂停了，它需要将自己装箱起来起来放到堆中。 所以所有的信息在恢复的时候保持原样。在它装箱之后，SetStateMachine 被装箱之后的值调用，使用装箱之后的值作为参数。换句话说，更深入地了解框架，你会发现代码是这样的
+在 release 版本中实现和这个一样，这个方法的目的是从更高层次来解释。当状态机执行第一步，它和根方法中的局部变量一样在栈中保存，如果它暂停了，它需要将自己装箱起来起来放到堆中。 所以所有的信息在恢复的时候保持原样。在它装箱之后，SetStateMachine 被装箱之后的值调用，使用装箱之后的值作为参数。换句话说，更深入地了解框架，你会发现代码是这样的
 
 ```C#
 void BoxAdnRemember<TStateMachine>(ref TStateMachine stateMachine)
@@ -1265,7 +1266,7 @@ void BoxAdnRemember<TStateMachine>(ref TStateMachine stateMachine)
 
 #### 6.2.1 一个具体的例子
 
-我将一个完整的方法开始，不要期待它代表任何事情，就简单花点时间浏览一下。拥有了具体的例子，更通用的结构就更容易理解，以为你可以回过来看看每一部分是如何对应到这个例子中的。我将再一次重复一下 6-1 中的例子。
+我将一个完整的方法开始，不要期待它代表任何事情，就简单花点时间浏览一下。拥有了具体的例子，更一般的结构就更容易理解，后面你可以回过来看看每一部分是如何对应到这个例子中的。我将再一次重复一下 6-1 中的例子。
 
 ```C#
 static async Task PrintAndWait(TimeSpan delay)
@@ -1320,6 +1321,7 @@ void IAsyncStateMachine.MoveNext()
             goto GetSecondAwaiterResult;
         }
         this.state = num = 1;
+        return;
     SecondAwaitContinuation:
         awaiter2 = this.awaiter;
         this.awaiter = default(TaskAwaiter);
@@ -1339,4 +1341,366 @@ void IAsyncStateMachine.MoveNext()
 }
 ```
 
-代码有点多，你可以看到好多 goto 语句和代码标签，这个很少再手写的代码中看得到。此刻我想这个有点难以理解，但是我想以这个具体的例子开始，你可以再任何使用引用它们。接下来我将它们拆分成更通用的结构，然后是特定的 awiat 表达式。在本小节结束的时候，这部分代码可能看上去更加难以理解。但是你会从不同的角度来了解为什么是这样的。
+代码有点多，你可以看到好多 goto 语句和代码标签，这个很少再手写的代码中看得到。此刻我想这个有点难以理解，但是我想以这个具体的例子开始，你可以在任何使用引用它们。接下来我将它们拆分成更通用的结构，然后是特定的 awiat 表达式。在本小节结束的时候，这部分代码可能看上去更加难以理解。但是你会从不同的角度来了解为什么是这样的。
+
+#### 6.2.2 MoveNext 一般的结构
+
+现在我们已经进入 async 下一个层次， MoveNext 方法是异步状态机的核心。它的复杂保证的 async 代码正确执行。越复杂，就应该感谢编译器为你做的工作。
+
+再一次提醒一下，MoveNext 只在下面两种情况下被执行
+- 异步方法第一次被调用
+- 在 await 表达式中从暂停状态恢复过来
+
+这个方法能够保证下面几点
+- 从正确的地方执行
+- 在需要暂停的地方保存状态，既包含局部变量也包含代码中的位置
+- 在需要暂停的时候安排一个 continuation
+- 从awiater 中获取返回值
+- 通过 builder 传递异常
+- 通过 builder 传递返回值
+
+有了这些基本概念，下面的代码展示了 MoveNext 方法中的一般结构的伪代码。在下一节中你可以看到由于额外的控制流而更复杂的代码。
+
+```C#
+void IAsyncStateMachine.MoveNext()
+{
+    try
+    {
+        switch(this.state)
+        {
+            default: goto MethodStart;
+            case 0: goto Label0A;
+            case 1: goto Label1A;
+            case 2: goto Label2A;
+        }
+        methodStart:
+
+        Lebel0A:
+
+        Leabl0B:
+    }
+    catch(Exception e)
+    {
+        this.state = -2;
+        builder.SetException(e);
+        return;
+    }
+    this.state = -2;
+    builder.SetResult();
+}
+```
+
+try/catch 语句块包含了之前异步方法的全部代码，如果抛出异常，都会被捕获到并且通过 builder 传递。只有特殊的异常（ThreadAbortException 或者 StackOverflowException） 不会导致 MoveNext 以异常结束。
+
+在 try/catch 语句块中，MoveNext 方法的开始都是 switch 表达式根据当前状态跳转到正确的代码片段。如果状态是非负的，表明它是从 await 表达中恢复过来，否则就认为是第一次执行 MoveNext 方法。
+
+有一点要注意的是在状态机中的返回语句和原始的异步方法的返回语句是不一样的。 在状态机中，return 用来在安排个 continuation 给 awaiter 之后的状态机暂停。原先的代码中的任何 return 语句都终结于状态机中的 try/catch 语句块的最后，在这里方法的完成会通过 builder 传递。
+
+如果你比较上面的两份代码，你会发现具体的例子是如何适应一般的模式。此刻我们已经通过简单的异步方法生成的代码如何开始的，只剩下一点是 await 表达式发生了什么。
+
+#### 6.2.3 深入理解 await 表达式
+
+让我们来看看每次运行到 await 表达式的时候发生了什么，假设你已经执行的操作数来获取一些 awaitable 的事情。
+1. 通过 GetAwaiter() 方法获取一个 awaiter，并将它保存在栈中
+2. 检查这个 awaiter 是否已经完成，如果完成了，你可以直接跳到获取结果这一步（Step 9), 这是最快的路径。
+3. 如果你在慢的路径上，通过状态的字段记住你已经到那个步骤了
+4. 保存这个 awaiter 到字段中
+5. 安排一个 continuation 到这个 awaiter， 确保当continuation指定的时候，你能够回到正确的状态
+6. 如果是第一次暂停，从 MoveNext 方法中返回到调用方法中；否则你回到安排 contination 的线程中。
+7. 如果 continuation 被执行了，你将状态机返回到 running 状态。
+8. 将 awaiter 从字段中拷贝到栈中，清理一些字段以便GC处理。现在你又回到了块路径中
+9. 从 awaiter 中获取结果，此刻这个变量保存在栈中。你必须调用 GetResult 方法，尽管又可能不会返回一个值但是为了传递可能的错误还是又必要的。
+10. 继续执行剩下的代码。
+
+有了这些，我们回顾一下之前的第一个 await 表达式的处理
+
+```C#
+    awaiter1 = Task.Delay(this.delay).GetAwaiter();
+    if(awaiter1.IsCompleted)
+    {
+        goto GetFirstAWaiterResult;
+    }
+    this.state = num = 0;
+    this.awaiter = awaiter1;
+    this.builder.AwaitUnsafeOnCompleted(ref awaiter1, ref this);
+    return;
+FirstAwaitContinuation:
+    awaiter1 = this.awaiter;
+    this.awaiter = default(TaskAwaiter);
+    this.state = num = -1;
+GetFirstAwaiterResult:
+    awaiter1.GetResult();
+```
+
+
+毫无疑问，上面的代码严格按照之前的执行，两个表明指明了需要跳转的地方：
+
+- 在快速路径中，你跳过这个慢路径的代码
+- 在慢路径代码中，当 continuation 执行的时候跳回到中间代码。
+
+
+builder.AwaitUnsafeOnCompl;eted(ref awaiter1, ref this) 方法是装箱操作的一部分，它回调用 SetStateMachine 方法并且安排continuation.在某些情况下，你会看到 AwaitOnCompleted 方法而不是 AwaitUnSafeOnCompleted. 其中的区别就是执行上下文是如何处理的。在 6.5 节中你会看到更多的血祭。
+
+还有一个细节不清楚的是为什么使用 num 的局部变量，它永远是作为被赋值者而且和 state 字段又相同的值，我想者仅仅是优化方便的考虑，无论任何使用读取 num,都可以认为是 this.state 字段。
+
+看看下面的代码 
+
+```C#
+await Task.Dealy(dealy);
+```
+
+好消息是你从来不会使用这样的代码除非你要做相关的测试。坏消息是即使这样简单的代码也会出现膨胀，在异步方法中不能通过 JIT 编译器做到内联。大部分时候，这就是我们为 async/await 方法付出的代价。
+
+这一节是简单的控制流，有了这个基础，我们可以看看复杂的情况。
+
+### 6.3 控制流是如何影响 MoveNext 方法
+
+目前你看到的例子都是只有包含 await 语句的顺序执行的方法。 但是在生产实际中可能写的是更加负责的异步方法。
+
+在本小节中，我将会展示两种不同的控制流，循环和 try/finally 语句，我想这两种并不是全部，但是我想这个能让你看看控制流的作用，有助于你理解其他情况。
+
+#### 6.3.1 awiat 表达式之间的控制流简单
+
+在开始之前，我先介绍引入的控制流并不影响生成代码的复杂性。在下面的代码中，循环语句被带入到方法中，你将打印三次 Between delay 而不是一次
+
+```C#
+static async Task PrintAndWait(TimeSpan delay)
+{
+    Console.WriteLine("Before first delay");
+    await Task.Delay(delay);
+    for(int i = 0; i < 3; i++)
+    {
+        Console.WriteLine("Between dealy");
+    }
+    await Task.Delay(delay);
+    Console.WriteLine("After second delay");
+}
+```
+
+反编译之后的代码和之前差不多，唯一的区别在于
+
+```C#
+GetFristAwaitResult:
+    awaite1.GetResult();
+    Console.WriteLine("Between delay");
+    TaskAwaiter awaiter2 = Task.Dealy(this.delay).GetAwaiter();
+```
+
+变成了 
+
+```C#
+GetFristAwaitResult:
+    awaite1.GetResult();
+    for (int i =0; i<3; i++)
+    {
+        Console.WriteLine("Between delay");
+    }
+    TaskAwaiter awaiter2 = Task.Dealy(this.delay).GetAwaiter();
+```
+
+状态机和之前的差不多，并且没有额外的字段或者复杂度引入，仅仅是一个循环。
+
+为什么我要提出这个例子主要是让你考虑一下在下一个例子中额外的复杂度。在这个例子中，你不需要从外面跳入到循环中。也不需要暂停操作并而跳出循环。下面的情况是如果你在循环中使用了 await 语句，接下来开始吧：
+
+#### 6.3.2 循环中 await
+
+目前我们的例子中值包含两个 await 语句，为了简化，目前将 await 语句调整为只有一个，请看下面的代码
+
+```C#
+static async Task AwaitInLoop(TimeSpan delay)
+{
+    Console.WriteLine("Before loop");
+    for(int i =0 ; i <3; i++)
+    {
+        Console.WriteLine("Before await in loop");
+        await Task.Delay(delay);
+        Console.WriteLine("After await in loop");
+    }
+    Console.WriteLine("After loop delay");
+}
+```
+
+编译器为它生成了什么？我不打算展示全部的代码，因为大部分和之前的非常类似。根方法和状态机也和之前的非常类似，不过增加了一个额外的字段对比于 i，也就是循环计数。有趣的部分是在 MoveNext 中。
+
+你可以很确信的认为C# 中没有构造循环。问题在于状态机从 Task.Delay 中恢复之后，你想跳转到原先循环的中间部分。你不能使用 goto 语句，因为 C# 语言禁止 goto 语句跳转到不属于它上下文的 label 中。
+
+当然你也可以通过很多 goto 语句来实现 for 循环，这样你就可以跳转到任何地方。下面的的反编译的代码就是 MoveNext 方法的主体部分。我只包含了部分 try 的语句。这也是我们专注的地方。
+
+```C#
+    switch(num)
+    {
+        default:
+            goto MethodStart;
+        case 0:
+            goto AwaiterContinuation:
+    }
+MethodStart:
+    Console.WriteLine("Before loop");
+    this.i = 0;
+    goto ForLoopCondition
+ForLoopCondition:
+    Console.WriteLine("Before await in loop");
+    TaskAwaiter awaiter = Task.Delay(this.delay).GetAwaiter();
+    if(awaiter.IsCompleted)
+    {
+        goto GetAwaiterResult;
+    }
+    this.state = num = 0;
+    this.awaiter =  awaiter;
+    this.builder.AwaiterUnsafeOnCompleted(ref awaiter, ref this);
+    return;
+AwaiterContinuation:
+    awaiter = this.awaiter;
+    this.awaiter = default(TaskAwaiter);
+    this.state = num = -1;
+GetResult:
+    awaiter.GetResult();
+    Console.WriteLine("After await in loop");
+    this.i++;
+ForLoopCondition:
+    if(this.i < 3)
+    {
+        goto ForLoopBody;
+    }
+    Console.WriteLine("After loop delay");
+```
+
+我不能跳过完成的例子，但是它引入的一些非常有趣的地方，首先C#编译器并不是将异步方法转换成等同的不包含任何 async/await 的方法。它仅仅创建了合适的 IL 代码，在有些地方，C#有比 IL 代码更严格的规则。
+
+第二点，尽管反编译异步代码非常有用，有时它不能生成有效的 C# 代码。我在第一次反编译之后，返现在 while 循环中包含了标签和 goto 语句想要跳进去执行。有时你可以告诉反编译器不要尽力将其表述成合法的 C# 代码，否则你会看到很多丑陋的 goto 语句
+
+第三点， 万一你还是不信，也不想手写这样代码。如果你通过 C# 4 代码编写这样的 Task，也可以达到同样的效果，不过是对比 async/await 而言有点丑陋。
+
+你已经知道包含 await 中循环可能导致问题复杂起来，但是并没有让编译器生成的代码不能完全理解。对于我们最后一个控制例子，你将会看到更难的工作：try/finally 语句块。
+
+#### 6.3.3 在 try/finally 语句块中 await
+
+正如我之前说的，在 try 语句中使用 await 是有效的，但是在 C# 5 中的 catch 和 finally 语句中是无效的，这个限制在 C# 6 中被放宽了，但是我并不会在代码中展示它们。
+
+在本小节中，我将仅仅展示在 try 语句块中使用 await，而且只有 finally 语句块。这也是最常用的方式，就跟 using 一样，下面的代码就是我们要反编译的。
+
+```C#
+static async Task AwaitInTryFinally(TimeSpan delay)
+{
+    Console.WriteLine("Before try block");
+    await Task.Delay(delay);
+    try
+    {
+        Console.WriteLine("Before await");
+        await Task.Delay(delay);
+        Console.WriteLine("After await");
+    }
+    finally
+    {
+        Console.WriteLine("In finally block");
+    }
+    Console.WriteLine("After finally block");
+}
+```
+
+你可以想象反编译之后的代码如下：
+
+```C#
+    switch(num)
+    {
+        default:
+            goto MethodStart;
+        case 0:
+            goto AwaitContinuation;
+    }
+MethodStart:
+    ...
+    try
+    {
+        ...
+    AwaiterContinuation:
+        ...
+    GetAwaitResult:
+        ...
+    }
+    finally
+    {
+        ...
+    }
+    ....
+```
+
+在这里，每个省略号都是代表了更多的代码，但是这里有个问题，即使在 IL 中，你也不允许从外部的 try 语句块跳入内部，这跟之前 C# 代码规则一样，不过这次是 IL 规则。
+
+为了完成这个目标，编译器采用一个叫做 trampoline 的技术，它跳入到到 try 语句块之前，在 try 语句块第一件事情就是跳转到正确的位置。
+
+同样在 finally 语句块中也要小心处理，在有些情况下，你将会执行 finally 语句块中的内容。
+- 你抵达了 try 语句块的最后
+- try 语句块抛出了异常
+- 你在 try 语句块中暂停了因为 await 语句
+
+如果执行 finally 语句的原因是你暂停了状态机而返回到调用者，那么原先异步方法中的 finally 语句块不应该执行。毕竟是的的逻辑暂停了，而它回在将来某个时刻恢复。幸运的是，这个很容易探测。通过 num 局部变量，如果它仍然是负的，也就是状态机还是在执行或者结束，非负表示你正在暂停。
+
+这些全部合并起来就是下面的代码，在 try 语句块的内容。尽管还是有很多代码，但是这些你已经非常熟悉了，我仅仅高亮了 try/finally 内容。
+
+```C#
+    switch(num)
+    {
+        default:
+            goto MethodStart;
+        case 0:
+            goto AwaitContinuationTrampoline;
+    }
+MethodStart:
+    Console.WriteLine("Before try");
+AwaitContinuationTrampoline:
+    try
+    {
+        swtich(num)
+        {
+            default:
+                goto TryBlockStart;
+            case 0:
+                goto AwaitContinuation;
+        }
+        TryBlockStart:
+            Console.WriteLine("Before await");
+            TaskWaiter awaiter = Task.Delay(this.delay).GetAwaiter();
+            if (awaiter.IsCompleted)
+            {
+                goto GetAwaiterResult;
+            }
+            this.state = num = 0;
+            this.awaiter = awaiter;
+            this.builder.AwaiterUnsafeOnCompleted(ref awaiter, ref this);
+            return;
+        AwaiterContinuation:
+            awaiter = this.awaiter;
+            this.awaiter = default(TaskAwaiter);
+            this.state = num = -1;
+        GetAwaiterResult:
+            awaiter.GetResusult();
+            Console.WriteLine("After awaiter");
+    }
+    finally
+    {
+        if(num < 0)
+        {
+            Console.WriteLine("In finally block");
+        }
+    }
+    Console.WriteLine("After finally block");
+```
+
+这是本章最后的一个反编译代码，我想这个复杂度可以帮你的浏览生成的代码。这并不是说你不要保持你的头脑，特别要注意的是编译器可以做很多变化让我之前展示的代码变得简单。正如我之前说的，我这里用的是 switch 语句让跳转更加容易看懂，而在编译器更多选择其他方式。多种情况一致性在阅读代码的时候非常重要，但是对于编译器来讲就没有必要了。
+
+我跳过的部分是为什么 awaite 需要实现 INotifyCompletion 接口也需要实现 ICtriticalNotifyCompletion，这些都在编译后的代码中，让我们近距离看看。
+
+### 6.4 执行流
+
+在 5.2.2 小节，我描述过同步上下文，它用来控制线程上下文代码执行。这是 .Net 中的一种，或许是最著名的一个。它提供了一种方式来透明地管理信息，举例来讲，SecurityContext 用来记录当前安全和代码访问相关东西。你不需要将所有的信息显式的传递。仅仅遵循代码就可以在所有情况下完成正确的事情。一个单独管理全部上下文的类是 ExecutionContext。
+
+提醒一下，Task 和 `Task<T>` 管理任何等待任务的同步上下文。如果你在 UI 线程上等待一个任务，异步方法中的 continuation 也是执行在 UI 线程上。你可以显式的调用 Task.ConfiguraitonAwait 方法来跳出。你需要显式的命令说：我知道不需要我剩下的代码不需要再同样的同步上下文中执行。执行上下文却不是这样的，你通常非常希望再异步方法继续执行在同样的上下文上，甚至它们在不同的线程中。
+
+执行上下文的保留叫做 flow。一个执行上下文就是 flow 可以在不同的 await 表达式中，意味着你的代码在相同的执行上下文中。那么如何保证到这一点呢？AsyncTaskMethodBuilder 总是怎么做的，TaskAwaiter 也会这么做，这就是神奇的地方。
+
+INotifyCompletion.OnCompleted 方法是仅仅是一个普通方法，任何人都可以调用它。相反的，ICriticalNotifyCompletion.OnCompleted 被标记为 `[SecurityCritial]`，也就是说它只能被信任的代码调用，比如框架的 AsynTaskMethodBuilder 类。
+
+如果你写过自己的 Awaiter 类，你关心正确地执行代码在信任的环境中。你应当确保你的 INotifyCompletion.OnCompleted 代码运行在执行上下文中。你也可以事项 ICritialNotifyCompletion 而不是在执行的上下文中。 异步框架已经帮我做好了，在普通情况下，这是优化过的awaiter 只会被异步框架使用。所以没有必要捕获和恢复执行上下文两次。
+
+在编译异步方法的时候，编译器会创建一个叫做 builder.AwaitOnCompleted 或者 builder.AwaitUnsafeOnCompleted 为每个 await 表达式。取决于 await 是否实现了 ICritifcalCompleteion. builder 是个泛型方法，包含一个约束是 awaiter 需要实现正确的接口。
