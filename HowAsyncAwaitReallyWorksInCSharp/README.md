@@ -1506,3 +1506,486 @@ if (!awaiter.IsCompleted) // we need to suspend when IsCompleted is false
     return;
 }
 ```
+
+这里生成的代码与所针对的平台表面区域无关，因此无论是 .NET Framework 还是 .NET Core，这种挂起的生成的 IL 都是相同的。然而，确实发生了变化的是 AwaitUnsafeOnCompleted 方法的实现，在 .NET Core 上有很大的不同：
+
+1. 尽管事情开始时是相同的：方法调用 ExecutionContext.Capture() 以获取当前的执行上下文。
+2. 然后，.NET Framework 的情况发生了分歧。.NET Core 中的构建器只有一个字段：
+
+```csharp
+public struct AsyncTaskMethodBuilder
+{
+    private Task<VoidTaskResult>? m_task;
+    ...
+}
+```
+
+在捕获 ExecutionContext 之后，它检查 m_task 字段是否包含 AsyncStateMachineBox<TStateMachine> 的实例，其中 TStateMachine 是编译器生成的状态机结构的类型。这个 AsyncStateMachineBox<TStateMachine> 类型就是所谓的“魔法”。它是这样定义的：
+
+```csharp
+private class AsyncStateMachineBox<TStateMachine> :
+    Task<TResult>, IAsyncStateMachineBox
+    where TStateMachine : IAsyncStateMachine
+{
+    private Action? _moveNextAction;
+    public TStateMachine? StateMachine;
+    public ExecutionContext? Context;
+    ...
+}
+```
+
+与其拥有一个独立的 Task，这就是任务（注意其基本类型）。与其将状态机装箱，结构只是作为一个强类型字段存在于这个任务上。而不是拥有一个单独的 MoveNextRunner 来存储 Action 和 ExecutionContext，它们只是这个类型的字段，而且由于这个实例被存储到构建器的 m_task 字段中，我们可以直接访问它，不需要在每次挂起时重新分配东西。如果 ExecutionContext 发生变化，我们可以用新的上下文覆盖该字段，而不需要分配其他内容；我们拥有的任何 Action 仍然指向正确的位置。所以，在捕获 ExecutionContext 之后，如果我们已经有了一个 AsyncStateMachineBox<TStateMachine> 的实例，那么这不是方法第一次挂起，我们可以将新捕获的 ExecutionContext 存储到其中。如果我们还没有 AsyncStateMachineBox<TStateMachine> 的实例，那么我们需要分配它：
+
+```csharp
+var box = new AsyncStateMachineBox<TStateMachine>();
+taskField = box; // important: this must be done before storing stateMachine into box.StateMachine!
+box.StateMachine = stateMachine;
+box.Context = currentContext;
+```
+
+注意那行源代码注释为“重要”的地方。这取代了 .NET Framework 中复杂的 SetStateMachine 舞蹈，使得在 .NET Core 中实际上不使用 SetStateMachine。您在那里看到的 taskField 是对 AsyncTaskMethodBuilder 的 m_task 字段的引用。我们分配 AsyncStateMachineBox<TStateMachine>，然后通过 taskField 将该对象存储到构建器的 m_task（这是位于堆栈上的状态机结构中的构建器），然后将堆栈基础状态机（现在已经包含对盒子的引用）复制到基于堆的 AsyncStateMachineBox<TStateMachine>，这样 AsyncStateMachineBox<TStateMachine> 就可以适当地并递归地引用自身。仍然是令人费解的，但效率更高。
+
+3. 然后我们可以得到一个指向此实例上的方法的 Action，该方法将在调用 StateMachine 的 MoveNext 之前执行适当的 ExecutionContext 恢复。而且，可以将 Action 缓存在 \_moveNextAction 字段中，以便后续使用时可以重用相同的 Action。然后将该 Action 传递给 awaiter 的 UnsafeOnCompleted 以连接延续。
+
+这个解释说明了为什么其余的分配都消失了：<SomeMethodAsync>d\_\_1 不会被装箱，而只是作为任务本身的字段存在，而 MoveNextRunner 不再需要，因为它只存在于存储 Action 和 ExecutionContext。但是，根据这个解释，我们应该还看到了 1000 个 Action 分配，每个方法调用一个，但我们没有。为什么？那些 QueueUserWorkItemCallback 对象呢？我们仍然在 Task.Yield() 的一部分进行排队，所以为什么它们没有显示出来？
+
+正如我所提到的，将实现细节推到核心库的好处之一是它可以随着时间的推移发展实现，并且我们已经看到它是如何从 .NET Framework 发展到 .NET Core 的。从最初为 .NET Core 重写开始，它还进一步发展，通过在系统中具有对关键组件的内部访问来实现其他优化。特别是，异步基础架构了解核心类型，如 Task 和 TaskAwaiter。由于它了解它们并具有内部访问权限，因此它不必遵循公开定义的规则。C# 语言遵循的 awaiter 模式要求 awaiter 具有 AwaitOnCompleted 或 AwaitUnsafeOnCompleted 方法，这两个方法都将延续作为一个 Action，这意味着基础设施需要能够创建一个表示延续的 Action，以便与基础设施一无所知的任意 awaiter 一起工作。但是，如果基础设施遇到了它所了解的 awaiter，它就没有义务采取相同的代码路径。因此，System.Private.CoreLib 中定义的所有核心 awaiter 都了解 IAsyncStateMachineBoxes，并且可以将盒子对象本身视为延续。所以，例如，Task.Yield 返回的 YieldAwaitable 能够将 IAsyncStateMachineBox 直接排队到 ThreadPool 中作为一个工作项，而在 await 一个 Task 时使用的 TaskAwaiter 能够将 IAsyncStateMachineBox 直接存储到 Task 的延续列表中。无需 Action，无需 QueueUserWorkItemCallback。
+
+因此，在非常常见的情况下，一个异步方法只等待来自 System.Private.CoreLib 的内容（如 Task，Task<TResult>，ValueTask，ValueTask<TResult>，YieldAwaitable 以及这些的 ConfigureAwait 变体），最坏的情况是在整个异步方法的生命周期中只有一个与之相关的额外分配：如果该方法暂停，它会分配一个存储所有其他必需状态的单一 Task 派生类型，如果该方法从不暂停，就不会产生额外分配。
+
+我们还可以在一定程度上消除这个最后的分配。正如已经显示的那样，Task 有一个默认的构建器（AsyncTaskMethodBuilder），类似地，Task<TResult> 有一个默认的构建器（AsyncTaskMethodBuilder<TResult>），而 ValueTask 和 ValueTask<TResult> 有一个默认的构建器（AsyncValueTaskMethodBuilder 和 AsyncValueTaskMethodBuilder<TResult> 分别）。对于 ValueTask/ValueTask<TResult>，构建器实际上相当简单，因为它们自身只处理同步且成功完成的情况，在这种情况下，异步方法在不暂停的情况下完成，构建器只需返回 ValueTask.Completed 或者包装结果值的 ValueTask<TResult>。对于其他所有情况，它们只需委托给 AsyncTaskMethodBuilder/AsyncTaskMethodBuilder<TResult>，因为将返回的 ValueTask/ValueTask<TResult> 只是包装一个 Task，它可以共享所有相同的逻辑。但是，.NET 6 和 C# 10 引入了一种方法，可以在方法级别覆盖使用的构建器，并引入了一些专门针对 ValueTask/ValueTask<TResult> 的构建器，这些构建器可以池化表示最终完成的 IValueTaskSource/IValueTaskSource<TResult> 对象，而不是使用 Tasks。
+
+我们可以在我们的样本中看到这种影响。让我们稍微调整一下我们正在分析的 SomeMethodAsync，让它返回 ValueTask 而不是 Task：
+
+```csharp
+static async ValueTask SomeMethodAsync()
+{
+    for (int i = 0; i < 1000; i++)
+    {
+        await Task.Yield();
+    }
+}
+```
+
+现在，我们将 [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))] 添加到 SomeMethodAsync 的声明中：
+
+```csharp
+[AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
+static async ValueTask SomeMethodAsync()
+{
+    for (int i = 0; i < 1000; i++)
+    {
+        await Task.Yield();
+    }
+}
+```
+
+编译器会输出这个代码：
+
+```csharp
+[AsyncStateMachine(typeof(<SomeMethodAsync>d__1))]
+[AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
+private static ValueTask SomeMethodAsync()
+{
+    <SomeMethodAsync>d__1 stateMachine = default;
+    stateMachine.<>t__builder = PoolingAsyncValueTaskMethodBuilder.Create();
+    stateMachine.<>1__state = -1;
+    stateMachine.<>t__builder.Start(ref stateMachine);
+    return stateMachine.<>t__builder.Task;
+}
+
+```
+
+整个实现的实际 C# 代码生成，包括整个状态机（未显示），几乎相同。唯一的区别是创建、存储并在我们之前看到的构建器引用的地方使用的构建器的类型。如果您查看 PoolingAsyncValueTaskMethodBuilder 的代码，您会发现其结构与 AsyncTaskMethodBuilder 几乎相同，包括使用一些完全相同的共享例程来处理诸如特殊处理已知的 awaiter 类型之类的事情。关键区别在于，当方法首次暂停时，它不是执行 new AsyncStateMachineBox<TStateMachine>()，而是执行 StateMachineBox<TStateMachine>.RentFromCache()，当异步方法（SomeMethodAsync）完成且返回的 ValueTask 上的等待完成时，租用的框将返回缓存。这意味着（摊销后）零分配。
+
+![image](./images/04allocation.png)
+
+这个缓存本身有点有趣。对象池可能是个好主意，也可能是个坏主意。对象创建的成本越高，对象池的价值就越大；例如，池化非常大的数组比池化非常小的数组更有价值，因为较大的数组不仅需要更多的 CPU 周期和内存访问来清零，还会对垃圾收集器产生更大的压力，导致收集更频繁。然而，对于非常小的对象，池化可能是一个净负面效果。池只是内存分配器，就像 GC 一样，所以当你池化时，你正在将一个分配器的成本抵消另一个分配器的成本，而 GC 在处理大量短暂的小对象方面非常高效。如果你在对象的构造函数中执行了大量工作，避免这些工作可能会使分配器本身的成本变得微不足道，从而使池化变得有价值。但是，如果你在对象的构造函数中几乎不做任何工作，而是池化它，你就在押注你的分配器（你的池）在所使用的访问模式中比 GC 更高效，而这往往是一个糟糕的赌注。还有其他成本，而且在某些情况下，你可能会有效地与 GC 的启发式方法作斗争；例如，GC 是基于这样一个前提进行优化的，即来自较高代（例如 gen2）对象到较低代（例如 gen0）对象的引用相对较少，但是池化对象可能会使这些前提无效。
+
+现在，异步方法创建的对象并不小，而且可能位于非常热的路径上，所以池化是合理的。但是，为了使其尽可能有价值，我们还想尽可能避免更多的开销。因此，池非常简单，选择让租用和返回变得非常快，几乎没有争用，即使这意味着它可能会比更积极地缓存更多的情况下分配更多。对于每种状态机类型，实现会为每个线程池化一个状态机框，为每个核心池化一个状态机框；这使得它可以以最小的开销和最小的争用（没有其他线程可以同时访问线程特定的缓存，同时访问核心特定缓存的线程也很少）进行租用和返回。虽然这看起来像是一个相对较小的池，但它也非常有效地显著降低了稳态分配，因为池只负责存储当前未使用的对象；你可以在任何给定时间让一百万个异步方法都处于活动状态，即使池只能为每个线程和每个核心存储一个对象，它仍然可以避免丢弃大量的对象，因为它只需要将对象存储足够长的时间，以便将其从一个操作传递到另一个操作，而不是在操作使用它的同时。这样，对象池可以有效地降低对象创建和销毁的开销，提高性能。
+
+## SynchronizationContext and ConfigureAwait
+
+我们之前在事件异步模式（EAP）的上下文中讨论过 SynchronizationContext，并提到它会再次出现。SynchronizationContext 使得可以调用可重用的帮助程序，并在调用环境认为合适的任何时间和地点自动调度回来。因此，自然希望它可以与 async/await 一起“正常工作”，实际上它也确实如此。回顾之前的按钮点击处理程序：
+
+```csharp
+ThreadPool.QueueUserWorkItem(_ =>
+{
+    string message = ComputeMessage();
+    button1.BeginInvoke(() =>
+    {
+        button1.Text = message;
+    });
+});
+```
+
+使用 async/await，我们希望能够像下面这样编写代码：
+
+```csharp
+button1.Text = await Task.Run(() => ComputeMessage());
+```
+
+在此示例中，ComputeMessage 的调用被卸载到线程池，当方法完成时，执行会转回与按钮关联的 UI 线程，然后在该线程上设置 Text 属性。
+
+SynchronizationContext 与 awaiter 实现的集成（为状态机生成的代码对 SynchronizationContext 一无所知），因为 awaiter 负责在表示的异步操作完成时实际调用或排队提供的延续。虽然自定义 awaiter 不需要遵循 SynchronizationContext.Current，但 Task、Task<TResult>、ValueTask 和 ValueTask<TResult>的 awaiter 都需要。这意味着，默认情况下，当你等待一个 Task、Task<TResult>、ValueTask、ValueTask<TResult>或甚至是 Task.Yield()调用的结果时，awaiter 会默认查找当前的 SynchronizationContext，然后如果成功获取到一个非默认的 SynchronizationContext，最终会将延续队列到该上下文。
+
+我们可以通过查看 TaskAwaiter 中的代码来理解这一点。这里是 Corelib 中相关代码的片段：
+
+```csharp
+internal void UnsafeSetContinuationForAwait(IAsyncStateMachineBox stateMachineBox, bool continueOnCapturedContext)
+{
+    if (continueOnCapturedContext)
+    {
+        SynchronizationContext? syncCtx = SynchronizationContext.Current;
+        if (syncCtx != null && syncCtx.GetType() != typeof(SynchronizationContext))
+        {
+            var tc = new SynchronizationContextAwaitTaskContinuation(syncCtx, stateMachineBox.MoveNextAction, flowExecutionContext: false);
+            if (!AddTaskContinuation(tc, addBeforeOthers: false))
+            {
+                tc.Run(this, canInlineContinuationTask: false);
+            }
+            return;
+        }
+        else
+        {
+            TaskScheduler? scheduler = TaskScheduler.InternalCurrent;
+            if (scheduler != null && scheduler != TaskScheduler.Default)
+            {
+                var tc = new TaskSchedulerAwaitTaskContinuation(scheduler, stateMachineBox.MoveNextAction, flowExecutionContext: false);
+                if (!AddTaskContinuation(tc, addBeforeOthers: false))
+                {
+                    tc.Run(this, canInlineContinuationTask: false);
+                }
+                return;
+            }
+        }
+    }
+
+    ...
+}
+```
+
+这是一个确定将什么对象存储到任务作为延续的方法的一部分。它传递了 stateMachineBox，正如前面提到的，可以直接存储到 Task 的延续列表中。然而，这个特殊的逻辑可能会包装 IAsyncStateMachineBox 以包含调度器（如果有的话）。它检查当前是否有一个非默认的 SynchronizationContext，如果有，它将创建一个 SynchronizationContextAwaitTaskContinuation 作为实际存储为延续的对象；该对象反过来包装原始的和捕获的 SynchronizationContext，并知道如何在后者的工作项队列中调用前者的 MoveNext。这就是你能够在 UI 应用程序的某个事件处理程序中等待，并且在等待完成之后的代码继续在正确的线程上执行的原因。值得注意的是，这里不仅仅关注 SynchronizationContext：如果找不到一个自定义的 SynchronizationContext 来使用，它还会查看任务所使用的 TaskScheduler 类型是否有一个需要考虑的自定义调度器。与 SynchronizationContext 一样，如果有一个非默认的调度器，它将与原始的 box 一起包装在一个 TaskSchedulerAwaitTaskContinuation 中，该对象用作延续对象。
+
+但可以说这里最有趣的一点是方法体的第一行：if (continueOnCapturedContext)。我们只有在 continueOnCapturedContext 为 true 时才会检查 SynchronizationContext/TaskScheduler；如果为 false，则实现将忽略它们。那么，究竟什么设置了 continueOnCapturedContext 为 false 呢？你可能已经猜到了：使用众所周知的 ConfigureAwait(false)。
+
+在 ConfigureAwait FAQ 中，我详细讨论了 ConfigureAwait，所以我建议你阅读更多信息。简而言之，ConfigureAwait(false)作为 await 的一部分所做的唯一事情就是将其参数 Boolean 传递给此函数（以及其他类似函数）作为 continueOnCapturedContext 值，以跳过对 SynchronizationContext/TaskScheduler 的检查，并表现得好像它们不存在。在任务的情况下，这允许任务在其认为合适的地方调用其延续，而不是被迫将它们排队到某个特定的调度器上执行。
+
+我之前提到了 SynchronizationContext 的另一个方面，我说我们会再看到它：OperationStarted/OperationCompleted。现在是时候了。这些功能作为每个人都喜欢讨厌的功能的一部分：async void。除了 ConfigureAwait，async void 可能是作为 async/await 添加的最具争议的功能之一。它只有一个原因：事件处理程序。在 UI 应用程序中，你希望能够编写如下代码：
+
+```csharp
+button1.Click += async (sender, eventArgs) =>
+{
+  button1.Text = await Task.Run(() => ComputeMessage());
+};
+```
+
+但是，如果所有的异步方法都必须具有像 Task 这样的返回类型，那么你将无法做到这一点。Click 事件具有 public event EventHandler? Click;签名，EventHandler 定义为 public delegate void EventHandler(object? sender, EventArgs e);，因此要提供与该签名匹配的方法，该方法需要返回 void。
+
+async void 被认为是不好的原因有很多，为什么文章建议尽可能避免使用它，以及为什么分析器会出现以标记它们的使用。其中一个最大的问题是与委托推断。考虑以下程序：
+
+```csharp
+using System.Diagnostics;
+
+Time(async () =>
+{
+    Console.WriteLine("Enter");
+    await Task.Delay(TimeSpan.FromSeconds(10));
+    Console.WriteLine("Exit");
+});
+
+static void Time(Action action)
+{
+    Console.WriteLine("Timing...");
+    Stopwatch sw = Stopwatch.StartNew();
+    action();
+    Console.WriteLine($"...done timing: {sw.Elapsed}");
+}
+```
+
+人们可能会认为这将输出至少 10 秒的经过时间，但如果你运行这个程序，你会发现输出类似这样的结果：
+
+```shell
+Timing...
+Enter
+...done timing: 00:00:00.0037550
+```
+
+根据我们在这篇文章中讨论的内容，应该可以理解问题所在。异步 lambda 实际上是一个 async void 方法。异步方法在遇到第一个挂起点时返回给调用者。如果这是一个 async Task 方法，那么 Task 将在这时返回。但对于 async void，没有任何返回值。所有 Time 方法知道的是，它调用了 action()；代理调用返回了；但它并不知道异步方法实际上仍然在“运行”，并且稍后将异步完成。
+
+这就是 OperationStarted/OperationCompleted 发挥作用的地方。这样的 async void 方法在性质上类似于前面讨论的 EAP 方法：这些方法的启动是 void 的，因此你需要一些其他机制来跟踪所有这些进行中的操作。因此，EAP 实现在操作开始时调用当前 SynchronizationContext 的 OperationStarted，在操作完成时调用 OperationCompleted，而 async void 也是如此。与 async void 关联的构建器是 AsyncVoidMethodBuilder。请记住，在异步方法的入口点，编译器生成的代码如何调用构建器的静态 Create 方法以获取适当的构建器实例？AsyncVoidMethodBuilder 利用这一点来在创建时挂钩并调用 OperationStarted：
+
+```csharp
+public static AsyncVoidMethodBuilder Create()
+{
+    SynchronizationContext? sc = SynchronizationContext.Current;
+    sc?.OperationStarted();
+    return new AsyncVoidMethodBuilder() { _synchronizationContext = sc };
+}
+```
+
+同样，当构建器通过 SetResult 或 SetException 标记为完成时，它调用相应的 OperationCompleted 方法。这就是像 xunit 这样的单元测试框架能够拥有 async void 测试方法，并在并发测试执行时实现最大程度的并发性，例如在 xunit 的 AsyncTestSyncContext 中。
+
+有了这些知识，我们现在可以重写我们的计时示例：
+
+```csharp
+using System.Diagnostics;
+
+Time(async () =>
+{
+    Console.WriteLine("Enter");
+    await Task.Delay(TimeSpan.FromSeconds(10));
+    Console.WriteLine("Exit");
+});
+
+static void Time(Action action)
+{
+    var oldCtx = SynchronizationContext.Current;
+    try
+    {
+        var newCtx = new CountdownContext();
+        SynchronizationContext.SetSynchronizationContext(newCtx);
+
+        Console.WriteLine("Timing...");
+        Stopwatch sw = Stopwatch.StartNew();
+
+        action();
+        newCtx.SignalAndWait();
+
+        Console.WriteLine($"...done timing: {sw.Elapsed}");
+    }
+    finally
+    {
+        SynchronizationContext.SetSynchronizationContext(oldCtx);
+    }
+}
+
+sealed class CountdownContext : SynchronizationContext
+{
+    private readonly ManualResetEventSlim _mres = new ManualResetEventSlim(false);
+    private int _remaining = 1;
+
+    public override void OperationStarted() => Interlocked.Increment(ref _remaining);
+
+    public override void OperationCompleted()
+    {
+        if (Interlocked.Decrement(ref _remaining) == 0)
+        {
+            _mres.Set();
+        }
+    }
+
+    public void SignalAndWait()
+    {
+        OperationCompleted
+        _mres.Wait();
+    }
+}
+```
+
+在这里，我创建了一个 SynchronizationContext，用于跟踪待处理操作的计数，并支持阻塞等待它们全部完成。当我运行它时，我得到了如下输出：
+
+```shell
+Timing...
+Enter
+Exit
+...done timing: 00:00:10.0149074
+```
+
+## State Machine Fields
+
+到目前为止，我们已经看到了生成的入口点方法以及 MoveNext 实现中的所有内容。我们还简要地了解了状态机上定义的一些字段。让我们更仔细地看看这些字段。
+
+对于之前显示的 CopyStreamToStream 方法：
+
+```csharp
+public async Task CopyStreamToStreamAsync(Stream source, Stream destination)
+{
+    var buffer = new byte[0x1000];
+    int numRead;
+    while ((numRead = await source.ReadAsync(buffer, 0, buffer.Length)) != 0)
+    {
+        await destination.WriteAsync(buffer, 0, numRead);
+    }
+}
+
+```
+
+我们得到了以下字段：
+
+```csharp
+private struct <CopyStreamToStreamAsync>d__0 : IAsyncStateMachine
+{
+    public int <>1__state;
+    public AsyncTaskMethodBuilder <>t__builder;
+    public Stream source;
+    public Stream destination;
+    private byte[] <buffer>5__2;
+    private TaskAwaiter <>u__1;
+    private TaskAwaiter<int> <>u__2;
+
+    ...
+}
+```
+
+这些字段分别是什么？
+
+- <>1\_\_state：这是“状态机”中的“状态”。它定义了状态机所处的当前状态，最重要的是，下次调用 MoveNext 时应该执行什么操作。如果状态为-2，则操作已完成。如果状态为-1，要么我们即将首次调用 MoveNext，要么 MoveNext 代码当前正在某个线程上运行。如果您在调试异步方法的处理过程中看到状态为-1，那么意味着某个地方的某个线程正在执行该方法中包含的代码。如果状态为 0 或更大，方法处于挂起状态，状态的值告诉您它在哪个 await 处挂起。虽然这不是一个硬性规定（某些代码模式可能会使编号混乱），但通常，分配的状态对应于源代码自上而下排序中基于 0 的 await 编号。例如，如果一个异步方法的主体完全是：
+
+```csharp
+await A();
+await B();
+await C();
+await D();
+```
+
+当您发现状态值为 2 时，这几乎可以肯定意味着异步方法当前处于挂起状态，等待从 C()返回的任务完成。
+
+- <>t\_\_builder：这是状态机的构建器，例如 Task 的 AsyncTaskMethodBuilder，ValueTask<TResult>的 AsyncValueTaskMethodBuilder<TResult>，异步 void 方法的 AsyncVoidMethodBuilder，或者通过在异步返回类型上的[AsyncMethodBuilder(...)]声明的构建器，或者通过在异步方法本身上的这样一个属性覆盖。正如之前讨论过的，构建器负责异步方法的生命周期，包括创建返回任务，最终完成该任务，并作为暂停的中介，异步方法中的代码要求构建器暂停，直到某个特定的 awaiter 完成。
+
+- source/destination：这些是方法参数。您可以从它们的命名中看出来；编译器将它们命名为与参数名相同。如前所述，所有被方法体使用的参数都需要存储到状态机上，以便 MoveNext 方法可以访问它们。请注意，我说的是“被使用”。如果编译器发现一个参数没有被异步方法体使用，它可以优化掉存储字段的需要。例如，对于以下方法：
+
+```csharp
+public async Task M(int someArgument)
+{
+    await Task.Yield();
+}
+```
+
+编译器将在状态机上生成以下字段：
+
+```csharp
+private struct <M>d__0 : IAsyncStateMachine
+{
+    public int <>1__state;
+    public AsyncTaskMethodBuilder <>t__builder;
+    private YieldAwaitable.YieldAwaiter <>u__1;
+    ...
+}
+```
+
+注意缺少一个名为 someArgument 的字段。但是，如果我们改变异步方法以某种方式实际使用参数：
+
+```csharp
+public async Task M(int someArgument)
+{
+    Console.WriteLine(someArgument);
+    await Task.Yield();
+}
+```
+
+它会出现：
+
+```csharp
+private struct <M>d__0 : IAsyncStateMachine
+{
+    public int <>1__state;
+    public AsyncTaskMethodBuilder <>t__builder;
+    public int someArgument;
+    private YieldAwaitable.YieldAwaiter <>u__1;
+    ...
+}
+```
+
+- <buffer>5\_\_2：这是“局部”的缓冲区，它被提升为字段，以便在 await 点之间存活。编译器会尽量避免不必要地提升状态。注意源代码中还有另一个局部变量 numRead，它在状态机中没有对应的字段。为什么？因为没有必要。这个局部变量是作为 ReadAsync 调用的结果设置的，然后作为 WriteAsync 调用的输入。在这两者之间没有 await，需要存储 numRead 值。就像在同步方法中 JIT 编译器可以选择将这样一个值完全存储在寄存器中，而从不实际将其溢出到栈中一样，C#编译器可以避免将这个局部变量提升为字段，因为它不需要在任何 await 之间保留它的值。一般来说，如果 C#编译器能证明它们的值不需要在 await 之间保留，就可以省略提升局部变量。
+
+- <>u**1 和<>u**2：在异步方法中有两个 await：一个是 ReadAsync 返回的 Task<int>，另一个是 WriteAsync 返回的 Task。Task.GetAwaiter()返回一个 TaskAwaiter，而 Task<TResult>.GetAwaiter()返回一个 TaskAwaiter<TResult>，这两者都是不同的结构类型。因为编译器需要在 await 之前获取这些 awaiter（IsCompleted，UnsafeOnCompleted），然后在 await 之后访问它们（GetResult），因此需要存储这些 awaiter。由于它们是不同的结构类型，编译器需要维护两个单独的字段来执行此操作（另一种选择是对它们进行装箱并为 awaiter 使用单个对象字段，但这将导致额外的分配成本）。然而，编译器会尽量在可能的情况下复用字段。例如：
+
+```csharp
+public async Task M()
+{
+    await Task.FromResult(1);
+    await Task.FromResult(true);
+    await Task.FromResult(2);
+    await Task.FromResult(false);
+    await Task.FromResult(3);
+}
+```
+
+有五个 await，但只涉及两种不同类型的 awaiter：三个是 TaskAwaiter<int>，两个是 TaskAwaiter<bool>。因此，在状态机上最终只生成了两个 awaiter 字段：
+
+```csharp
+private struct <M>d__0 : IAsyncStateMachine
+{
+    public int <>1__state;
+    public AsyncTaskMethodBuilder <>t__builder;
+    private TaskAwaiter<int> <>u__1;
+    private TaskAwaiter<bool> <>u__2;
+    ...
+}
+```
+
+然后，如果我改变我的示例为：
+
+```csharp
+public async Task M()
+{
+    await Task.FromResult(1);
+    await Task.FromResult(true);
+    await Task.FromResult(2).ConfigureAwait(false);
+    await Task.FromResult(false).ConfigureAwait(false);
+    await Task.FromResult(3);
+}
+```
+
+仍然只涉及 Task<int>和 Task<bool>，但实际上我使用了四个不同的结构 awaiter 类型，因为从 ConfigureAwait 返回的 GetAwaiter()调用返回的 awaiter 是不同于从 Task.GetAwaiter()返回的 awaiter 类型的… 这再次从编译器创建的 awaiter 字段中可以看出：
+
+```csharp
+private struct <M>d__0 : IAsyncStateMachine
+{
+    public int <>1__state;
+    public AsyncTaskMethodBuilder <>t__builder;
+    private TaskAwaiter<int> <>u__1;
+    private TaskAwaiter<bool> <>u__2;
+    private ConfiguredTaskAwaitable<int>.ConfiguredTaskAwaiter <>u__3;
+    private ConfiguredTaskAwaitable<bool>.ConfiguredTaskAwaiter <>u__4;
+    ...
+}
+```
+
+如果您发现自己希望优化异步状态机的大小，您可以查看是否可以整合所等待的事物种类，从而整合这些 awaiter 字段。
+
+您可能会在状态机上看到其他类型的字段。特别是，您可能会在某些字段中看到“wrap”一词。考虑以下荒谬的示例：
+
+```csharp
+public async Task<int> M() => await Task.FromResult(42) + DateTime.Now.Second;
+```
+
+这将生成具有以下字段的状态机：
+
+```csharp
+private struct <M>d__0 : IAsyncStateMachine
+{
+    public int <>1__state;
+    public AsyncTaskMethodBuilder<int> <>t__builder;
+    private TaskAwaiter<int> <>u__1;
+    ...
+}
+```
+
+到目前为止，没什么特别的。现在翻转要添加的表达式的顺序：
+
+```csharp
+public async Task<int> M() => DateTime.Now.Second + await Task.FromResult(42);
+```
+
+这会生成具有以下字段的状态机：
+
+```csharp
+private struct <M>d__0 : IAsyncStateMachine
+{
+    public int <>1__state;
+    public AsyncTaskMethodBuilder<int> <>t__builder;
+    private int <>7__wrap1;
+    private TaskAwaiter<int> <>u__1;
+    ...
+}
+```
+
+现在我们多了一个：<>7\_\_wrap1。为什么呢？因为我们计算了 DateTime.Now.Second 的值，只有在计算它之后，我们才不得不等待某个内容，而第一个表达式的值需要保留下来，以便将其添加到第二个表达式的结果中。编译器因此需要确保第一个表达式的临时结果可用于将来添加到 await 的结果中，这意味着它需要将表达式的结果溢出到临时值中，它通过这个 <>7\*\*wrap1 字段来实现。
+
+如果您发现自己一直在优化异步方法实现以减少分配的内存量，可以查找此类字段，看看源代码的小调整是否可以避免溢出的需要，从而避免此类临时值的需要。
+
+## Wrap Up
+
+我希望这篇文章能够帮助您了解在使用 async/await 时底层到底发生了什么，但值得庆幸的是，您通常不需要知道或关心这些内容。这里有很多移动的部分，它们共同为编写可扩展的异步代码提供了高效的解决方案，而无需处理回调函数的复杂性。然而，在一天结束时，这些部分实际上相对简单：用于表示任何异步操作的通用表示，能够将正常控制流重写为协程状态机实现的语言和编译器，以及将它们全部绑定在一起的模式。其他所有内容都是优化方面的附加收益。
