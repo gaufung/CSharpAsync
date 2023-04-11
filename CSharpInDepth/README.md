@@ -1169,7 +1169,7 @@ private struct PrintAdnWaitStateMachine : IAsyncStateMachine
 
 - 它实现了 IAsyncStateMachine 接口，它是基础框架使用的，这个接口只有两个展示的两个方法
 - 字段，用来存储状态机需要记住的上一步和下一步直接的状态。
-- MoveNext 方法，状态机没启动一次就调用一次，每次暂停之后就被唤醒
+- MoveNext 方法，状态机每启动一次就调用一次，每次暂停之后就被唤醒
 - SetStateMachine 方法，有同样的实现方式。
 
 你已经看到了实现 IAsyncStateMachine 接口类型的使用。 尽管还有以下是隐藏着的，AsyncTaskMethodBuilder.Start() 是一个泛型方法，包含一个约束是类型参数必须事项 IAsyncStateMachine 接口。做一些清理之后，Start 方法调用 MoveNext 方法来去确保状态机执行异步方法的第一步。
@@ -1491,7 +1491,7 @@ await Task.Dealy(dealy);
 
 在本小节中，我将会展示两种不同的控制流，循环和 try/finally 语句，我想这两种并不是全部，但是我想这个能让你看看控制流的作用，有助于你理解其他情况。
 
-#### 6.3.1 awiat 表达式之间的控制流简单
+#### 6.3.1 await 表达式之间的控制流简单
 
 在开始之前，我先介绍引入的控制流并不影响生成代码的复杂性。在下面的代码中，循环语句被带入到方法中，你将打印三次 Between delay 而不是一次
 
