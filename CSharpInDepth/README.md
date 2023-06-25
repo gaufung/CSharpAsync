@@ -161,7 +161,7 @@ Continuation 在 .NET 中用委托的形式保存，它们通常是一个具体�
 
 #### 5.2.2 同步上下文
 
-之前我提到过，UI 代码地黄金准则是不允许跨线程更新用户界面，在之前地例子中，检查网页地长度是在异步中执行，所以你要确保 await 表达式之后地代码是在 UI 线程中执行。异步函数会通过 SynchronizationContext 回到正确地线程上执行，这个类从 .NET 2.0 就已经存在了，广泛使用在 BackgroundWorker 组件中。SynchronzationContext 可以将一个委托执行在正确的线程上，它的 Post (异步) 和 Send (同步) 消息和 Control.BeginInvoke 和 Control.Invoke 类似。
+之前我提到过，UI 代码地黄金准则是不允许跨线程更新用户界面，在之前地例子中，检查网页地长度是在异步中执行，所以你要确保 await 表达式之后的代码是在 UI 线程中执行。异步函数会通过 SynchronizationContext 回到正确地线程上执行，这个类从 .NET 2.0 就已经存在了，广泛使用在 BackgroundWorker 组件中。SynchronzationContext 可以将一个委托执行在正确的线程上，它的 Post (异步) 和 Send (同步) 消息和 Control.BeginInvoke 和 Control.Invoke 类似。
 
 不同的执行环境使用不同的上下文，比如一个上下文可以让来自线程池中的线程执行给定的操作。 如果你对异步方法如何做到管理不同的执行情况，你可以关注 synchronziation 上下文。如果你是一个 ASP.NET 的开发者，特别要留心它的上下文，它经常让开发者陷入死锁状态。但是在 ASP.NET Core 中，这种情况好多了。
 
@@ -218,7 +218,7 @@ public async virtual Task<int> FooAsycn() {}
 ```
 
 我更倾向去将 `async` 紧靠着返回值之前，但是这个取决于个人的偏好，这个和你们团队的人讨论好这个问题。
-现在 `async` 关键字好像有点神秘，语言的设计者其实没有必要添加一个 async 关键子，编译器只需要检查方法内部是否 `await` 关键字即可。但是我还是乐意让 `async` 是必须的，这样让读代码的时候就知道这是一个异步的方法，就像给你一个标识，让你关注其中的 `await` 语句。并且将阻塞的调用转变为异步地的调用。
+现在 `async` 关键字好像有点神秘，语言的设计者其实没有必要添加一个 async 关键字，编译器只需要检查方法内部是否 `await` 关键字即可。但是我还是乐意让 `async` 是必须的，这样让读代码的时候就知道这是一个异步的方法，就像给你一个标识，让你关注其中的 `await` 语句。并且将阻塞的调用转变为异步地的调用。
 
 实际上在生成的代码中，`async` 没有任何作用，只不过让调用者注意到这一点。这是一个兼容性的改变不管是源码还是二进制角度。实际上这个一个实现的细节，你不能在抽象方法和接口的方法中使用 `async`。但是更多的是在接口定义的时候使方法的返回值为 Task，不同的实现可以采用不同的方式，既可以使用 `async/await`，也可以使用常规的方法。
 
@@ -586,7 +586,7 @@ async Task<string> FetchFirstSuccessfulAsync(IEnumerable<string> urls)
 首先先回顾一下下面几点内容
 
 - 一个异步方法通常在它完成之前返回
-- 它在命中一个一个还没有完成的表达式返回
+- 它在命中一个还没有完成的表达式返回
 - 假设不是一个返回 void 的方法，在 C# 7 之前，它们必须是 `Task` 或者 `Task<TResult>`，在 C# 7 之后，可以自定义类型，目前我们假设返回值为 `Task<TResult>`
 - task 用来表示什么时候，以何种方式完成任务，如果 task 状态变成 RanToCompletion, 那么 Result 包含了返回值。如果方法抛出了一个异常，这个任务变成 Faulted. 异常会被封装到 AggerateException 中，包含在 task 的 Exception 属性中。
 - 当 task 状态变成任何一种终止状态，和它相关的 continuation 都会被开始被执行。
