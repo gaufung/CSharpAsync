@@ -1027,7 +1027,7 @@ public async Tesk FooAsync()
 
 正如我在第 5 章提到的，实现方式主要有状态机。编译器会生成私有的嵌套的结构来表示异步方法，但是它必须有一个你已经声明相同的方法签名，我叫它跟方法。
 
-这个状态机记录了你在异步方法中到达了哪一步。逻辑上将，有四种状态，通常执行的顺序是
+这个状态机记录了你在异步方法中到达了哪一步。逻辑上讲，有四种状态，通常执行的顺序是
 
 - 未开始
 - 执行
@@ -1057,7 +1057,7 @@ static async Task PrintAndWait(TimeSpan delay)
 
 - 在状态机中有个参数
 - 这个方法中包含了两个 await 表达式
-- 这个方法发挥了 Task， 所以你需要在完成最后一行之后返回 Task，但是没有特殊的结果。
+- 这个方法返回了 Task， 所以你需要在完成最后一行之后返回 Task，但是没有特殊的结果。
 
 这个非常简单，没有循环，try/catch/finally 等等语句块。除了 await， 控制流也非常简单。让我们看看编译器生成了怎样的代码。
 
@@ -1471,7 +1471,7 @@ GetFirstAwaiterResult:
 - 在快速路径中，你跳过这个慢路径的代码
 - 在慢路径代码中，当 continuation 执行的时候跳回到中间代码。
 
-builder.AwaitUnsafeOnCompl;eted(ref awaiter1, ref this) 方法是装箱操作的一部分，它回调用 SetStateMachine 方法并且安排 continuation.在某些情况下，你会看到 AwaitOnCompleted 方法而不是 AwaitUnSafeOnCompleted. 其中的区别就是执行上下文是如何处理的。在 6.5 节中你会看到更多的血祭。
+builder.AwaitUnsafeOnCompl;eted(ref awaiter1, ref this) 方法是装箱操作的一部分，它回调用 SetStateMachine 方法并且安排 continuation.在某些情况下，你会看到 AwaitOnCompleted 方法而不是 AwaitUnSafeOnCompleted. 其中的区别就是执行上下文是如何处理的。在 6.5 节中你会看到更多的细节。
 
 还有一个细节不清楚的是为什么使用 num 的局部变量，它永远是作为被赋值者而且和 state 字段又相同的值，我想者仅仅是优化方便的考虑，无论任何使用读取 num,都可以认为是 this.state 字段。
 
